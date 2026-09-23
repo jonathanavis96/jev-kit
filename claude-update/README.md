@@ -8,11 +8,20 @@ machine looks idle.
 "In use" means either of:
 
 - a headless `claude -p` / `claude --print` run is alive (`pgrep`), or
-- any session transcript under `$HOME/.claude/projects` has changed in the
-  last `CLAUDE_UPDATE_IDLE_MIN` minutes (default 30).
+- an interactive `claude` process (one with a terminal and no `-p`) is open
+  and a transcript of the project it sits in has changed in the last
+  `CLAUDE_UPDATE_IDLE_MIN` minutes (default 30). The project directory is
+  derived from the process's cwd, under that process's `CLAUDE_CONFIG_DIR`
+  if it has one, else `$HOME/.claude/projects`.
 
 An interactive session that is open but idle for longer than that does not
 block the update. Only genuine recent activity does.
+
+Transcripts left behind by finished headless runs do not count. On a box
+where cron polls run `claude -p` every few minutes, the earlier rule ("any
+transcript changed recently") kept the whole projects tree permanently fresh
+and the update never ran (measured: 87 consecutive hourly skips, 2026-09-21
+to 2026-09-23).
 
 ## What gets installed
 

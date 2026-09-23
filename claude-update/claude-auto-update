@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Update Claude Code only when nobody is using it on this machine.
-# "In use" means: a headless `claude -p` run is alive, or any session transcript
-# under the shared projects directory changed in the last IDLE_MIN minutes.
+# "In use" means: a headless `claude -p` run is alive, or an interactive
+# `claude` process is open AND the transcripts of the project it sits in
+# (derived from its cwd) changed in the last IDLE_MIN minutes.
 # Interactive sessions that are merely open but idle do not block the update;
 # replacing the package on disk does not disturb a process already running.
+# Transcripts left behind by finished headless runs (cron polls) are ignored:
+# on a box that polls every few minutes they otherwise keep the whole
+# projects tree "fresh" and the update never happens.
 set -u
 IDLE_MIN="${CLAUDE_UPDATE_IDLE_MIN:-30}"
 PROJECTS="${CLAUDE_UPDATE_PROJECTS:-$HOME/.claude/projects}"
@@ -57,8 +61,31 @@ elif [ ! -x "$PREFIX/bin/claude" ]; then
 fi
 
 if pgrep -f 'claude(\.exe)? .*(-p|--print)( |$)' >/dev/null 2>&1; then say "skip: headless run alive"; exit 0; fi
-if [ -d "$PROJECTS" ] && [ -n "$(find -L "$PROJECTS" -name '*.jsonl' -mmin "-$IDLE_MIN" -print -quit 2>/dev/null)" ]; then
-  say "skip: a session was active in the last ${IDLE_MIN} min"; exit 0
+# Interactive sessions: a claude process with a controlling terminal and no
+# -p/--print. Map each one's cwd to its project directory the way Claude Code
+# does (every "/" becomes "-") and look only there for recent transcripts.
+interactive_pids() {
+  ps -eo pid=,tty=,args= 2>/dev/null | awk '
+    $2 != "?" && $3 ~ /(^|\/)claude(\.exe)?$/ {
+      headless = 0
+      for (i = 4; i <= NF; i++) if ($i == "-p" || $i == "--print") headless = 1
+      if (!headless) print $1
+    }'
+}
+if [ -d "$PROJECTS" ]; then
+  for pid in $(interactive_pids); do
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" || continue
+    [ -n "$cwd" ] || continue
+    # A session started with CLAUDE_CONFIG_DIR keeps its transcripts under
+    # that tree, not the shared one; read only that one variable.
+    base="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n1)"
+    base="${base:+$base/projects}"; base="${base:-$PROJECTS}"
+    proj="$base/$(printf '%s' "$cwd" | tr '/' '-')"
+    [ -d "$proj" ] || continue
+    if [ -n "$(find -L "$proj" -name '*.jsonl' -mmin "-$IDLE_MIN" -print -quit 2>/dev/null)" ]; then
+      say "skip: interactive session in $cwd (pid $pid) was active in the last ${IDLE_MIN} min"; exit 0
+    fi
+  done
 fi
 cur="$("$PREFIX/bin/claude" --version 2>/dev/null | awk '{print $1}')"
 new="$(npm view @anthropic-ai/claude-code version 2>/dev/null)"
