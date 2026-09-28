@@ -350,6 +350,24 @@ class TestR11Unlocked(BrowseStateCase):
         self.assertFalse(row["enforced"])
         self.assertTrue(row["warned"])
 
+    def test_the_notice_is_said_once_per_unlock_window(self):
+        browse_state.record_gave_up(self.SESSION, "error", goal="open a page")
+        denied, _, warn = self._run(self._payload())
+        self.assertFalse(denied)
+        warn.assert_called_once()
+        self.assertTrue(self.logged[-1]["announced"])
+        for _ in range(3):
+            denied, deny, warn = self._run(self._payload())
+            self.assertFalse(denied)
+            deny.assert_not_called()
+            warn.assert_not_called()
+            self.assertFalse(self.logged[-1]["announced"])
+            self.assertEqual(self.logged[-1]["unlocked_by"], "browse_blocked")
+        # A fresh `browse` failure opens a new window, which announces again.
+        browse_state.record_gave_up(self.SESSION, "blocked", goal="another goal")
+        _, _, warn = self._run(self._payload())
+        warn.assert_called_once()
+
     def test_a_browse_error_unlocks_as_well(self):
         browse_state.record_gave_up(self.SESSION, "error", goal="open a page")
         denied, deny, warn = self._run(self._payload())

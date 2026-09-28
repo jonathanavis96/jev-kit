@@ -549,8 +549,17 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
             entry["action"] = "warn"
             entry["enforced"] = False
             entry["warned"] = True
+            # Said once per unlock window, on the first Playwright call after
+            # `browse` gave up; later calls in the window run silently.
+            announce = False
+            try:
+                announce = browse_state.claim_announcement(session_id)
+            except Exception:
+                announce = False
+            entry["announced"] = announce
             log.append(entry)
-            advice.append(_browse_unlock_warn_text(rule.id, match.detail, row))
+            if announce:
+                advice.append(_browse_unlock_warn_text(rule.id, match.detail, row))
             return False
 
     # deny (or ask). Softening comes first: an explicit override stamp and a

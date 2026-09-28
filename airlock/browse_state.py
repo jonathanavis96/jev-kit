@@ -170,6 +170,32 @@ def recent_give_up(session_id, window_s=UNLOCK_WINDOW_S):
     return row
 
 
+def claim_announcement(session_id):
+    """True exactly once per unlock window: the first Playwright call after
+    `browse` gave up. Every later call in the same window gets False, so R11's
+    "the door is open" notice is said once instead of on every call (it was
+    repeated on each click, wait and snapshot, which read as spam). A new
+    `browse` failure writes a fresh row without the flag, so the next window
+    announces again. Never raises; a failure reads as False (stay quiet --
+    the call is allowed either way, only the notice is at stake)."""
+    try:
+        fd = _open_locked(platform_compat.LOCK_EXCLUSIVE)
+    except Exception:
+        return False
+    try:
+        data = _load(fd)
+        row = data.get(session_id or "")
+        if not isinstance(row, dict) or row.get("announced"):
+            return False
+        row["announced"] = True
+        _save(fd, data)
+        return True
+    except Exception:
+        return False
+    finally:
+        _close(fd)
+
+
 def unlocked(session_id, window_s=UNLOCK_WINDOW_S):
     """True if this session may use Playwright MCP because `browse` gave up."""
     return recent_give_up(session_id, window_s) is not None
