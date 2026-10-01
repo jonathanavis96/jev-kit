@@ -1054,7 +1054,7 @@ _DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/
 # shell runs whatever came down the wire. `curl page | bash norm.sh` hands the
 # page to a local script as stdin and is not this.
 _PIPE_TO_SHELL_RE = re.compile(
-    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
+    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-[ugpCUrtDRTh]\s+\S+\s+|--(?:user|group)\s+\S+\s+|-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
     r"(?:\s+-[^\s-]\S*)*\s*(?:--(?:\s|$)|$|[;&|\n)])"
 )
 # Quoted text is data (a commit message, an echo), never a pipeline. Blanked
@@ -1063,7 +1063,12 @@ _PIPE_TO_SHELL_RE = re.compile(
 _QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 # xargs options that take the NEXT token as their value, so that token is
 # not the command xargs runs (`xargs -n 1 rm -rf`, Codex P2, PR #17).
-_XARGS_VALUE_OPTS = {"-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s"}
+# GNU's long forms take a separate value too (`xargs --max-procs 4 rm -rf`).
+_XARGS_VALUE_OPTS = {
+    "-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s",
+    "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
+    "--process-slot-var",
+}
 # redis-cli options that take the next token as a value. The first token
 # left after them is the Redis command; a later FLUSHALL is a key or a
 # pattern (`redis-cli GET FLUSHALL`, Codex P2, PR #17).
@@ -1101,12 +1106,34 @@ def _first_positional(args, value_opts):
     return None
 
 
+# sudo options that take a value. Skipping only the option word read the
+# value as the program, so `sudo -u root rm -rf /` passed R7 as `root -rf /`.
+_SUDO_VALUE_SHORT = set("ugpCUrtDRTh")
+_SUDO_VALUE_LONG = {
+    "--user", "--group", "--prompt", "--close-from", "--other-user", "--role",
+    "--type", "--chdir", "--chroot", "--command-timeout", "--host",
+}
+
+
 def _unsudo(prog, args):
     """R7 judges what runs, not how it was elevated (R5 owns `sudo`)."""
     while prog == "sudo" and args:
         rest = list(args)
         while rest and rest[0].startswith("-"):
-            rest = rest[1:]
+            opt, rest = rest[0], rest[1:]
+            if opt == "--":
+                break
+            if opt.startswith("--"):
+                if opt in _SUDO_VALUE_LONG and rest:
+                    rest = rest[1:]
+                continue
+            # A short cluster (`-iu root`, `-uroot`): the first value-taking
+            # letter takes the rest of the word, or the next word if none.
+            for j, ch in enumerate(opt[1:], 1):
+                if ch in _SUDO_VALUE_SHORT:
+                    if j == len(opt) - 1 and rest:
+                        rest = rest[1:]
+                    break
         if not rest:
             break
         prog, args = rest[0].rsplit("/", 1)[-1], rest[1:]
