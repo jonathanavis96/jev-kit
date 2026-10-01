@@ -10,7 +10,7 @@ import datetime
 import unittest
 from unittest import mock
 
-from airlock import health
+from airlock import client, health
 
 
 def _iso(minutes_ago):
@@ -261,6 +261,14 @@ class TestKeyLoadableNeverPrints(unittest.TestCase):
     def test_false_when_no_key(self):
         with mock.patch("airlock.keyfile.get_api_key", return_value=None):
             self.assertIs(health.check_key_loadable(), False)
+
+
+class TestCheckDaemonAskTimeout(unittest.TestCase):
+    def test_daemon_timeout_is_a_failed_check_not_a_crash(self):
+        with mock.patch.object(health, "_ask_via_daemon", return_value=client._DAEMON_TIMED_OUT):
+            result = health.check_daemon_ask(health._now() + 5)
+        self.assertFalse(result["ok"])
+        self.assertIn("timed out", result["error"])
 
 
 if __name__ == "__main__":

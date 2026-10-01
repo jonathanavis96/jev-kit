@@ -99,7 +99,13 @@ def _ask_via_daemon(body, timeout_s, windows=None):
         req = {"id": uuid.uuid4().hex, "body": body, "timeout_s": timeout_s}
         sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
         f = sock.makefile("rb")
-        line = f.readline()
+        try:
+            line = f.readline()
+        except socket.timeout:
+            # The daemon has the request and has used up the whole budget on
+            # it, so it may already be billed. A direct call now would bill
+            # it again and double the wait the hook is already over.
+            return _DAEMON_TIMED_OUT
         if not line:
             return None
         resp = json.loads(line.decode("utf-8"))

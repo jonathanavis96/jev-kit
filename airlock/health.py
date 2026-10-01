@@ -32,7 +32,7 @@ import time
 
 from . import keyfile, paths
 from . import mode as mode_mod
-from .client import MODEL, _ask_via_daemon, _daemon_socket_path
+from .client import MODEL, _DAEMON_TIMED_OUT, _ask_via_daemon, _daemon_socket_path
 from .client import ask as client_ask
 from .log import LOG_FILE
 from .platform_compat import has_unix_sockets
@@ -112,6 +112,8 @@ def check_daemon_ask(deadline):
     wall_latency_ms = int((time.monotonic() - start) * 1000)
     if result is None:
         return {"ok": False, "error": "no daemon response (down, refused, or malformed)", "latency_ms": wall_latency_ms}
+    if result is _DAEMON_TIMED_OUT:
+        return {"ok": False, "error": "daemon timed out waiting for TypeSafe", "latency_ms": wall_latency_ms}
     _response, reported_latency_ms, _reused = result
     return {"ok": True, "latency_ms": reported_latency_ms or wall_latency_ms}
 

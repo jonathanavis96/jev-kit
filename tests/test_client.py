@@ -153,6 +153,17 @@ class TestAskFallback(unittest.TestCase):
                 client.ask({"state": {}, "model": client.MODEL, "questions": {}}, timeout_s=1.5)
         call_jev.assert_not_called()
 
+    def test_daemon_read_timeout_raises_instead_of_resending(self):
+        # The daemon took the request and the client gave up waiting: the
+        # budget is spent and the request may be billed, so no direct call.
+        with mock.patch.object(client.socket, "socket") as sock_cls, \
+             mock.patch.object(client, "call_jev") as call_jev:
+            sock = sock_cls.return_value
+            sock.makefile.return_value.readline.side_effect = socket.timeout("timed out")
+            with self.assertRaises(client.TypeSafeError):
+                client.ask({"state": {}, "model": client.MODEL, "questions": {}}, timeout_s=1.5)
+        call_jev.assert_not_called()
+
     def test_never_puts_key_on_a_command_line_in_ask_or_daemon_path(self):
         import inspect
 
