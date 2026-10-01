@@ -141,6 +141,18 @@ class TestAskFallback(unittest.TestCase):
         self.assertEqual(latency_ms, 42)
         self.assertEqual(result["model"], "jev-1.13.0")
 
+    def test_daemon_timeout_raises_instead_of_resending(self):
+        # The daemon already spent the budget waiting on TypeSafe. Sending the
+        # same request again directly doubles the wait and the bill.
+        reply = {"id": "x", "ok": False, "error": "timed out", "timed_out": True}
+        with mock.patch.object(client.socket, "socket") as sock_cls, \
+             mock.patch.object(client, "call_jev") as call_jev:
+            sock = sock_cls.return_value
+            sock.makefile.return_value.readline.return_value = (json.dumps(reply) + "\n").encode()
+            with self.assertRaises(client.TypeSafeError):
+                client.ask({"state": {}, "model": client.MODEL, "questions": {}}, timeout_s=1.5)
+        call_jev.assert_not_called()
+
     def test_never_puts_key_on_a_command_line_in_ask_or_daemon_path(self):
         import inspect
 

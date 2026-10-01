@@ -113,6 +113,34 @@ class TestConnectionPool(unittest.TestCase):
         with self.assertRaises(ConnectionResetError):
             pool.request("/v1/systemone", b"{}", {}, 5)
 
+    def test_timeout_is_not_retried(self):
+        # A read timeout means TypeSafe is slow, not that the connection died.
+        # The POST already went out, so a retry would bill it twice.
+        slow_conn = _FakeConnection([
+            lambda: (_ for _ in ()).throw(socket.timeout("timed out")),
+        ])
+        made = [slow_conn]
+
+        def factory(timeout_s):
+            return made.pop(0)
+
+        pool = daemon.ConnectionPool(size=1, connection_factory=factory)
+        with self.assertRaises(socket.timeout):
+            pool.request("/v1/systemone", b"{}", {}, 5)
+        self.assertEqual(slow_conn.requests, 1)
+        self.assertTrue(slow_conn.closed)
+        self.assertIsNone(pool.slots[0].conn)
+
+    def test_timeout_reply_is_flagged(self):
+        class _SlowPool:
+            def request(self, *a, **k):
+                raise socket.timeout("timed out")
+
+        with mock.patch.object(daemon, "_log"):
+            reply = daemon._handle_ask({"id": "x", "body": {}}, "k", _SlowPool(), daemon.Stats())
+        self.assertFalse(reply["ok"])
+        self.assertTrue(reply.get("timed_out"))
+
     def test_round_robins_across_pool_slots(self):
         conn_a = _FakeConnection([lambda: _FakeResponse(200, {})])
         conn_b = _FakeConnection([lambda: _FakeResponse(200, {})])

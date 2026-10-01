@@ -33,6 +33,12 @@ class TypeSafeError(Exception):
     pass
 
 
+# The daemon reached TypeSafe but the answer did not arrive within timeout_s.
+# The budget is spent and the request was billed, so ask() raises rather than
+# sending the same request again directly.
+_DAEMON_TIMED_OUT = object()
+
+
 def call_jev(api_key, state, questions, timeout=DEFAULT_TIMEOUT):
     """POST one evaluation request. Returns (response_dict, latency_ms).
 
@@ -98,6 +104,8 @@ def _ask_via_daemon(body, timeout_s, windows=None):
             return None
         resp = json.loads(line.decode("utf-8"))
         if not resp.get("ok"):
+            if resp.get("timed_out"):
+                return _DAEMON_TIMED_OUT
             return None
         return resp.get("response"), resp.get("latency_ms", 0), resp.get("reused_connection", False)
     except Exception:
@@ -114,7 +122,10 @@ def ask(body, timeout_s=DEFAULT_TIMEOUT, windows=None):
     """Preferred entry point for every caller. Tries the warm daemon socket
     first (connect timeout 0.2s); if the socket is missing, refuses, or
     errors in any way, falls back to the direct HTTPS call (call_jev) so
-    behaviour is unchanged when the daemon isn't running. `body` is the exact
+    behaviour is unchanged when the daemon isn't running. The one exception
+    is a daemon that reports TypeSafe itself timed out: that raises
+    TypeSafeError, because a direct retry would double both the wait and the
+    bill for a judgement the budget has already given up on. `body` is the exact
     TypeSafe request body: {"state":..., "model":..., "questions":...}.
 
     Returns (response_dict, latency_ms), same shape as call_jev. Never raises
@@ -125,6 +136,8 @@ def ask(body, timeout_s=DEFAULT_TIMEOUT, windows=None):
     every judgement is the direct HTTPS call.
     """
     via_daemon = _ask_via_daemon(body, timeout_s, windows=windows)
+    if via_daemon is _DAEMON_TIMED_OUT:
+        raise TypeSafeError("timed out after %ss (via daemon)" % timeout_s)
     if via_daemon is not None:
         response, latency_ms, _reused = via_daemon
         return response, latency_ms

@@ -15,7 +15,7 @@ Protocol: one JSON object per line in, one JSON object per line out.
   Request:  {"id": "...", "body": {"state":..., "model":..., "questions":...}, "timeout_s": 5}
   Response: {"id": "...", "ok": true, "status": 200, "response": {...},
              "latency_ms": N, "reused_connection": true|false}
-         or {"id": "...", "ok": false, "error": "..."}
+         or {"id": "...", "ok": false, "error": "...", "timed_out": true|absent}
   Also: {"op": "ping"} -> {"ok": true, "pong": true}
         {"op": "stats"} -> {"ok": true, "stats": {...}}
 
@@ -68,6 +68,9 @@ _RETRYABLE = (
     ConnectionError,  # covers BrokenPipeError, ConnectionResetError
     OSError,
 )
+
+# socket.timeout is an OSError, so it has to be caught before _RETRYABLE.
+_TIMEOUTS = (socket.timeout, TimeoutError)
 
 
 def _socket_dir_and_path():
@@ -157,6 +160,17 @@ class ConnectionPool:
             try:
                 status, raw = self._do(slot.conn, path, body_bytes, headers, timeout_s)
                 return status, raw, reused
+            except _TIMEOUTS:
+                # A timeout is a slow answer, not a dead connection: the POST
+                # was already sent, so a retry would bill the same judgement
+                # twice and double the wait. Drop the half-used connection
+                # and let the caller fail open.
+                try:
+                    slot.conn.close()
+                except Exception:
+                    pass
+                slot.conn = None
+                raise
             except _RETRYABLE:
                 try:
                     slot.conn.close()
@@ -233,7 +247,12 @@ def _handle_ask(req, api_key, pool, stats):
         latency_ms = int((time.monotonic() - start) * 1000)
         stats.record(latency_ms, False, ok=False)
         _log(id_, "error", latency_ms, False, 0, 0)
-        return {"id": id_, "ok": False, "error": redact.redact(str(exc))[:300]}
+        reply = {"id": id_, "ok": False, "error": redact.redact(str(exc))[:300]}
+        if isinstance(exc, _TIMEOUTS):
+            # Tells the client the budget is already spent, so it must not
+            # spend it a second time on a direct call.
+            reply["timed_out"] = True
+        return reply
 
     latency_ms = int((time.monotonic() - start) * 1000)
 
