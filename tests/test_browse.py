@@ -381,6 +381,19 @@ class TestACall(CallCase):
         self.assertNotIn(KEY, json.dumps(result))
         self.assertIn("[REDACTED]", result["content"][0]["text"])
 
+    def test_the_text_model_key_is_scrubbed_too(self):
+        text_key = "sk-or-v1-textmodelsecret0123456789"
+        with mock.patch.dict(os.environ, {"TEXT_MODEL_API_KEY": text_key}):
+            with mock.patch.object(self.browse, "ask",
+                                   return_value=dict(self.RESULT, text="leak %s" % text_key)):
+                result = call(self.srv, goal="open https://example.com")
+            self.assertNotIn(text_key, json.dumps(result))
+            with mock.patch.object(self.browse, "ask",
+                                   side_effect=server.BrowseError("401 for %s" % text_key)):
+                result = call(self.srv, goal="open https://example.com")
+        self.assertTrue(result["isError"])
+        self.assertNotIn(text_key, json.dumps(result))
+
 
 class TestShutdown(CallCase):
     def shut_down_after(self, calls, owned):

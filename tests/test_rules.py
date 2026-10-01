@@ -400,6 +400,26 @@ class TestR3HostCapacity(unittest.TestCase):
         for c in ("git add .env.example", "git add README.md", "git status"):
             self.assertEqual(fired(ctx_bash(c), "R9-commit-secret"), [], c)
 
+    def test_r9_reads_past_git_global_options(self):
+        token = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+        for c in ("git -C repo add .env", "git --git-dir=x/.git add server.key",
+                  "git -c core.x=y commit -m 'key %s'" % token):
+            self.assertTrue(fired(ctx_bash(c), "R9-commit-secret"), c)
+        for c in ("git -C repo add README.md", "git -C repo status .env"):
+            self.assertEqual(fired(ctx_bash(c), "R9-commit-secret"), [], c)
+
+    def test_questions_state_sent_to_jev_is_redacted(self):
+        secret = "apikey_" + "S3cretValue0123456789"
+        cmd = "TYPESAFE_API_KEY=%s cat ~/secrets/prod.txt" % secret
+        ctx = ctx_bash(cmd)
+        m = rules.Match("x", "y", ask=True, extra={"target": "~/secrets/prod.txt", "segment": cmd})
+        for fn in (rules.questions_secret, rules.questions_long_run):
+            state, _qs = fn(ctx, m)
+            self.assertNotIn(secret, json.dumps(state), fn.__name__)
+        m = rules.Match("x", "y", ask=True, extra={"purpose": "check %s" % secret})
+        state, _qs = rules.questions_claude_api(ctx_bash("x"), m)
+        self.assertNotIn(secret, json.dumps(state))
+
     def test_no_rule_for_an_ordinary_call(self):
         for c in ("ls -la", "git status", "python3 -c 'print(1)'"):
             self.assertEqual(fired(ctx_bash(c)), [], c)

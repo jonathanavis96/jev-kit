@@ -622,10 +622,13 @@ def prefilter_secret(ctx):
 
 
 def questions_secret(ctx, match):
+    # This state leaves the box. R1 asks precisely about commands near a
+    # secret, so it is the rule most likely to carry one inline.
+    from . import redact
     state = {
-        "command": ctx["command"][:2000],
+        "command": redact.redact_and_truncate_command(ctx["command"] or "")[:2000],
         "tool_name": ctx["tool_name"],
-        "target": match.extra.get("target", ""),
+        "target": redact.redact(match.extra.get("target", "")),
     }
     qs = {
         "prints_a_secret": {
@@ -707,7 +710,8 @@ def prefilter_claude_api(ctx):
 
 
 def questions_claude_api(ctx, match):
-    state = {"skill": "claude-api", "args": match.extra.get("purpose", "")[:2000]}
+    from . import redact
+    state = {"skill": "claude-api", "args": redact.redact(match.extra.get("purpose", ""))[:2000]}
     qs = {
         "purpose": {
             "type": "choice",
@@ -937,7 +941,9 @@ def prefilter_long_run(ctx):
 
 
 def questions_long_run(ctx, match):
-    state = {"command": ctx["command"][:2000], "segment": match.extra.get("segment", "")}
+    from . import redact
+    state = {"command": redact.redact_and_truncate_command(ctx["command"] or "")[:2000],
+             "segment": redact.redact(match.extra.get("segment", ""))[:600]}
     qs = {
         "runs_over_two_minutes": {
             "type": "noul",
@@ -1374,10 +1380,13 @@ def prefilter_commit_secret(ctx):
         prog, args = program_of(seg)
         if prog != "git" or not args:
             continue
-        if args[0] not in ("add", "commit", "stage"):
+        # Skip git's global options, or `git -C repo add .env` and
+        # `git -c k=v commit -m <token>` read as no subcommand at all.
+        i = _first_positional(args, _GIT_VALUE_OPTS)
+        if i is None or args[i] not in ("add", "commit", "stage"):
             continue
         git_write = True
-        hit = _secret_path_in(args[1:])
+        hit = _secret_path_in(args[i + 1:])
         if hit:
             return Match("`git %s` would stage a secret file (%s)" % (args[0], hit), R9_SUGGESTION)
 
