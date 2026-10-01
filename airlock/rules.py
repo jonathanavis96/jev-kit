@@ -215,6 +215,36 @@ def words(segment):
     return out
 
 
+# Wrappers whose own options (and, for timeout, a duration) come before the
+# command they run. Not skipping them hid `env sudo rm -rf /etc` from R5 and
+# `timeout 60 rm -rf /` from R7.
+_VALUE_WRAPPERS = {"env", "timeout"}
+_ENV_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+_TIMEOUT_VALUE_OPTS = {"-s", "--signal", "-k", "--kill-after"}
+
+
+def _wrapped_command(toks):
+    """The tokens of the command an `env`/`timeout` wrapper runs, or None when
+    it runs none."""
+    wrapper, i = toks[0].rsplit("/", 1)[-1], 1
+    value_opts = _ENV_VALUE_OPTS if wrapper == "env" else _TIMEOUT_VALUE_OPTS
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            i += 1
+            break
+        if t.startswith("-") and len(t) > 1:
+            i += 2 if t in value_opts else 1
+            continue
+        if wrapper == "env" and _ASSIGN_RE.match(t):
+            i += 1
+            continue
+        break
+    if wrapper == "timeout":
+        i += 1  # the duration
+    return toks[i:] or None
+
+
 def program_of(segment):
     """First real command word of a segment, skipping leading VAR=val
     assignments and wrappers like nice/time. Returns (program, args)."""
@@ -222,6 +252,15 @@ def program_of(segment):
     while toks:
         if _ASSIGN_RE.match(toks[0]):
             toks = toks[1:]
+            continue
+        if toks[0].rsplit("/", 1)[-1] in _VALUE_WRAPPERS:
+            # `env FOO=1 sudo ...`, `timeout 5 rm -rf /`: the wrapper runs the
+            # command after its own options. A bare `env` (or one with nothing
+            # after its options) is itself the program and stays it.
+            rest = _wrapped_command(toks)
+            if rest is None:
+                break
+            toks = rest
             continue
         if toks[0] in _SKIP_PREFIX:
             toks = toks[1:]
@@ -940,8 +979,6 @@ R5_SUGGESTION = (
 )
 
 
-# sudo's own options that take a value as the NEXT token (`sudo -u root ...`).
-_SUDO_ARG_OPTS = {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"}
 _PKG_REFRESH = {"update"}
 
 
@@ -955,10 +992,21 @@ def _sudo_rest(toks, idx):
         if t == "--":
             i += 1
             break
-        if t in _SUDO_ARG_OPTS:
-            i += 2
+        if t.startswith("--"):
+            # `--user root`: the value is the next word (`--user=root` is one)
+            i += 2 if t in _SUDO_VALUE_LONG else 1
             continue
-        if t.startswith("-") or _ASSIGN_RE.match(t):
+        if t.startswith("-"):
+            # A short cluster (`-iu root`, `-uroot`): the first value-taking
+            # letter takes the rest of the word, or the next word if none.
+            i += 1
+            for j, ch in enumerate(t[1:], 1):
+                if ch in _SUDO_VALUE_SHORT:
+                    if j == len(t) - 1:
+                        i += 1
+                    break
+            continue
+        if _ASSIGN_RE.match(t):
             i += 1
             continue
         break
@@ -1100,7 +1148,7 @@ _DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/
 # page to a local script as stdin and is not this.
 _PIPE_TO_SHELL_RE = re.compile(
     r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-[A-Za-z]*[ugpCUrtDRTh]\s+\S+\s+|--(?:user|group)\s+\S+\s+|-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
-    r"(?:\s+-[^\s-]\S*)*\s*(?:--(?:\s|$)|$|[;&|\n)])"
+    r"(?:\s+-[^\s-]\S*)*\s*(?:--?(?:\s|$)|$|[;&|\n)])"
 )
 # Quoted text is data (a commit message, an echo), never a pipeline. Blanked
 # before the pipe-to-shell search so `git commit -m 'avoid curl x | bash; ...'`
@@ -1114,6 +1162,9 @@ _XARGS_VALUE_OPTS = {
     "--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
     "--process-slot-var",
 }
+# git's global options that take the next token as their value.
+_GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                   "--exec-path", "--config-env", "--super-prefix"}
 # redis-cli options that take the next token as a value. The first token
 # left after them is the Redis command; a later FLUSHALL is a key or a
 # pattern (`redis-cli GET FLUSHALL`, Codex P2, PR #17).
@@ -1199,6 +1250,8 @@ def _whole_tree_target(a):
     if raw in ("/", "/*", "~", "~/", "$HOME", "${HOME}", "*", ".", "./", "..", "../", "./*"):
         return raw
     p = _expand(raw)
+    if p.endswith("/*"):
+        p = p[:-2]  # `rm -rf ~/*` empties the home directory just the same
     if p.rstrip("/") == HOME:
         return raw
     return None
@@ -1210,6 +1263,12 @@ def prefilter_destructive(ctx):
     for seg in ctx["segments"]:
         prog, args = _unsudo(*program_of(seg))
         if prog == "git" and args:
+            # The subcommand comes after git's global options: `git -C repo
+            # push --force` is still a force-push.
+            i = _first_positional(args, _GIT_VALUE_OPTS)
+            args = args[i:] if i is not None else []
+            if not args:
+                continue
             sub = args[0]
             joined = " ".join(args)
             if sub == "push" and re.search(r"(^|\s)(--force|-f)(\s|$)", " " + joined):
