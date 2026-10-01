@@ -132,9 +132,10 @@ DISABLE_VARS = ("AIRLOCK_DISABLE", "PLUMBLINE_DISABLE", "JEV_GUARD_DISABLE")
 class Warning_:
     """One thing to say, with the key that de-duplicates it.
 
-    `key` is the whole message, not a category, so a warning whose detail
+    `key` names what is wrong, not the wording, so a warning whose detail
     changes (a different failed check) counts as a new warning and is shown
-    straight away.
+    straight away, while one whose numbers drift (minutes since the last
+    health row, a latency in an error string) does not.
     """
 
     def __init__(self, key, headline, command, repeat_s=REPEAT_AFTER_S):
@@ -287,6 +288,28 @@ def failed_checks(row):
         rate = last_hour.get("fail_open_rate")
         if isinstance(rate, (int, float)) and rate > 0.20:
             out.append("fail-open rate %d%% in the last hour" % round(rate * 100))
+    return out
+
+
+def failed_check_names(row):
+    """The same checks as failed_checks(), named without their reason text or
+    the rate. This is what the de-dup key is built from: an error string that
+    carries a latency, or a fail-open rate that moves by a point, is the same
+    warning and must not count as news on every session start."""
+    out = []
+    if not isinstance(row, dict):
+        return out
+    for name in ("daemon_ping", "daemon_ask", "direct_ask"):
+        check = row.get(name)
+        if isinstance(check, dict) and check.get("ok") is False:
+            out.append(name)
+    if row.get("key_loadable") is False:
+        out.append("key_loadable")
+    last_hour = row.get("last_hour")
+    if isinstance(last_hour, dict):
+        rate = last_hour.get("fail_open_rate")
+        if isinstance(rate, (int, float)) and rate > 0.20:
+            out.append("fail_open_rate")
     return out
 
 
@@ -521,7 +544,7 @@ def choose_warning(facts):
         reasons = failed_checks(row)
         detail = "; ".join(reasons) if reasons else "no failing check named in the row"
         return Warning_(
-            "health:%s:%s" % (status, detail),
+            "health:%s:%s" % (status, ",".join(failed_check_names(row))),
             "airlock health is %s: %s." % (status, detail),
             doctor)
 
@@ -535,8 +558,10 @@ def choose_warning(facts):
                     when = "has never run"
                 else:
                     when = "last ran %d minutes ago" % int(age // 60)
+                # The key leaves the minutes out: they change on every
+                # session start, so keying on them showed this every time.
                 return Warning_(
-                    "stale:%s" % when,
+                    "stale:never" if age is None else "stale:old",
                     "airlock's health check %s, so its health timer may have "
                     "stopped." % when,
                     doctor)
