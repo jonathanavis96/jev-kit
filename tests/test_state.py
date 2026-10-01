@@ -47,6 +47,18 @@ class TestLoopState(unittest.TestCase):
         state_mod.record_denial("s1", ("bash", "find / -name x"))
         self.assertFalse(state_mod.was_recently_denied("s1", ("bash", "find / -name y"), 600))
 
+    def test_wrong_shaped_session_row_does_not_disable_recording(self):
+        # A session row that is not a dict used to make _prune raise inside
+        # record_denial, which then gave up on every call from then on.
+        state_mod.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state_mod.STATE_FILE.write_text('{"old": ["x"], "s1": "bad"}')
+        self.assertFalse(state_mod.was_recently_denied("s1", ("bash", "ls"), 600))
+        key = ("bash", "find / -name x")
+        state_mod.record_denial("s2", key)
+        self.assertTrue(state_mod.was_recently_denied("s2", key, 600))
+        state_mod.record_denial("s1", key)
+        self.assertTrue(state_mod.was_recently_denied("s1", key, 600))
+
     def test_expired_denial_not_seen(self):
         key = ("agent", "do the thing")
         state_mod.record_denial("s1", key)

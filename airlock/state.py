@@ -76,7 +76,13 @@ def _save(fd, data):
 
 def _prune(data, now):
     for sess in list(data.keys()):
-        entries = data.get(sess) or {}
+        entries = data.get(sess)
+        if not isinstance(entries, dict):
+            # A row of the wrong shape can never be read, and leaving it in
+            # place made every later record_denial() raise here and give up:
+            # loop protection silently stopped recording for good.
+            del data[sess]
+            continue
         for k in list(entries.keys()):
             try:
                 stale = (now - entries[k]) > PRUNE_AFTER_S
@@ -107,10 +113,10 @@ def was_recently_denied(session_id, key, window_s):
         except Exception:
             pass
 
-    ts = (data.get(session_id or "") or {}).get(_key_str(key))
-    if ts is None:
-        return False
     try:
+        ts = (data.get(session_id or "") or {}).get(_key_str(key))
+        if ts is None:
+            return False
         return (time.time() - ts) <= window_s
     except Exception:
         return False

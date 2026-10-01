@@ -174,6 +174,22 @@ class TestFailOpen(EnforceTestBase):
         self.assertFalse(denied)
         self.assertEqual(buf.getvalue(), "")
 
+    def test_one_rule_raising_does_not_skip_the_rest(self):
+        # R1 asks Jev; a `probabilities` list makes compute_margin raise. That
+        # used to escape to handle(), drop R7's warn and log nothing at all.
+        bad = ({"answers": {"prints_a_secret": {
+            "choice": "yes", "confidence": 0.99, "probabilities": ["yes", "no"]}}}, 10)
+        buf = self._stdout()
+        with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
+             mock.patch("airlock.client.ask", return_value=bad):
+            denied = enforce.handle(_bash_data("cat secrets.txt; rm -rf ~"), "Bash")
+        self.assertFalse(denied)
+        self.assertIn("R7-destructive", buf.getvalue())
+        rows = {e.get("rule_id"): e for e in self._logged}
+        self.assertIn("error", rows["R1-secret-exposure"])
+        self.assertFalse(rows["R1-secret-exposure"]["enforced"])
+        self.assertIn("R7-destructive", rows)
+
     def test_generic_exception_in_compute_allows(self):
         buf = self._stdout()
         with mock.patch("airlock.guards.compute_tier_entry", side_effect=RuntimeError("boom")):
