@@ -59,6 +59,19 @@ class TestLog(unittest.TestCase):
             self.assertEqual(json.loads(lines[0]), {"a": 1})
             self.assertEqual(json.loads(lines[1]), {"b": 2})
 
+    def test_a_lone_surrogate_does_not_drop_the_row(self):
+        """A "\\ud800" escape in the hook's JSON input decodes to a lone
+        surrogate. Encoding it strictly raised and the row was silently lost."""
+        entry = {"command": json.loads('"rm \\ud800 -rf x"'), "enforced": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp) / "state" / "airlock"
+            log_file = log_dir / "shadow.jsonl"
+            with mock.patch.object(jlog, "LOG_DIR", log_dir), mock.patch.object(jlog, "LOG_FILE", log_file):
+                jlog.append(entry)
+            lines = log_file.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0]), entry)
+
     def test_append_never_raises_on_bad_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "state" / "airlock"

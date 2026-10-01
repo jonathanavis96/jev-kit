@@ -87,6 +87,17 @@ class TestAskFallback(unittest.TestCase):
         self.assertEqual(result["model"], "jev-1.13.0")
         self.assertEqual(latency_ms, 900)
 
+    def test_no_api_key_raises_without_a_network_call(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing_sock = os.path.join(d, "missing.sock")
+            with mock.patch.object(client, "_daemon_socket_path", return_value=missing_sock), \
+                 mock.patch.object(client, "call_jev") as call_jev, \
+                 mock.patch.object(client.keyfile, "get_api_key", return_value=None):
+                with self.assertRaises(client.TypeSafeError) as cm:
+                    client.ask({"state": {}, "model": client.MODEL, "questions": {}})
+        call_jev.assert_not_called()
+        self.assertIn("no API key", str(cm.exception))
+
     def test_falls_back_when_daemon_refuses_connection(self):
         with tempfile.TemporaryDirectory() as d:
             sock_path = os.path.join(d, "jev.sock")

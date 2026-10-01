@@ -166,6 +166,21 @@ class TestTheReadLoop(unittest.TestCase):
         self.assertIn("RuntimeError", out[0]["result"]["content"][0]["text"])
         self.assertEqual(out[1]["id"], 2)
 
+    def test_text_the_stdout_cannot_encode_does_not_end_the_server(self):
+        """A lone surrogate from a page, or "→" on a cp1252 stdout, raised
+        UnicodeEncodeError in the write and ended the read loop."""
+        for encoding, text in (("utf-8", json.loads('"a \\ud800 b"')), ("cp1252", "a \u2192 b")):
+            raw = io.BytesIO()
+            out = io.TextIOWrapper(raw, encoding=encoding, errors="strict", newline="\n")
+            lines = [json.dumps(rpc("tools/call", 1, name="browse", arguments={"goal": "g"})),
+                     json.dumps(rpc("ping", 2))]
+            server.Server(FakeBrowse({"final_url": "https://example.com/", "title": text})).serve(
+                io.StringIO("".join(x + "\n" for x in lines)), out)
+            out.flush()
+            got = [json.loads(x) for x in raw.getvalue().decode(encoding).splitlines()]
+            self.assertEqual([r["id"] for r in got], [1, 2], encoding)
+            self.assertEqual(json.loads(got[0]["result"]["content"][0]["text"])["title"], text)
+
     def test_the_real_server_answers_the_handshake_over_stdio(self):
         """What install/doctor.sh does: a real process, a real pipe."""
         lines = [json.dumps(rpc("initialize", 1, protocolVersion="2025-06-18")),

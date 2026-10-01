@@ -988,7 +988,10 @@ class Server:
                 if not line.strip():
                     continue
                 for response in self.handle_line(line):
-                    stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+                    # ASCII escapes on the wire: a lone surrogate from a page,
+                    # or any non-ASCII text on a stdout that is not UTF-8
+                    # (cp1252 on Windows), raised here and ended the server.
+                    stdout.write(json.dumps(response) + "\n")
                     stdout.flush()
         except (KeyboardInterrupt, BrokenPipeError):
             pass

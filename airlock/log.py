@@ -36,7 +36,12 @@ def append(entry):
         try:
             platform_compat.lock_file(fd, platform_compat.LOCK_EXCLUSIVE)
             try:
-                os.write(fd, line.encode("utf-8"))
+                # A lone surrogate (a "\ud800" escape in the hook's JSON
+                # input) cannot be encoded strictly, and raising here dropped
+                # the whole row, a deny included, without a word.
+                # backslashreplace writes it back as the same JSON escape, so
+                # the line still parses to exactly the entry given.
+                os.write(fd, line.encode("utf-8", "backslashreplace"))
             finally:
                 platform_compat.unlock_file(fd)
         finally:

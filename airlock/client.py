@@ -143,4 +143,8 @@ def ask(body, timeout_s=DEFAULT_TIMEOUT, windows=None):
         return response, latency_ms
 
     api_key = keyfile.get_api_key()
+    if not api_key:
+        # Without this the request went out as "Bearer None", spent the budget
+        # on a round trip and was logged as an HTTP 401 from TypeSafe.
+        raise TypeSafeError("no API key (%s not found)" % keyfile.ENV_VAR)
     return call_jev(api_key, body.get("state"), body.get("questions"), timeout=timeout_s)
