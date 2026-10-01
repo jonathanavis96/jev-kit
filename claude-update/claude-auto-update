@@ -63,7 +63,9 @@ fi
 if pgrep -f 'claude(\.exe)? .*(-p|--print)( |$)' >/dev/null 2>&1; then say "skip: headless run alive"; exit 0; fi
 # Interactive sessions: a claude process with a controlling terminal and no
 # -p/--print. Map each one's cwd to its project directory the way Claude Code
-# does (every "/" becomes "-") and look only there for recent transcripts.
+# does (every character that is not a letter or digit becomes "-", so
+# /home/u/.config/my_app is -home-u--config-my-app) and look only there for
+# recent transcripts.
 interactive_pids() {
   ps -eo pid=,tty=,args= 2>/dev/null | awk '
     $2 != "?" && $3 ~ /(^|\/)claude(\.exe)?$/ {
@@ -80,7 +82,7 @@ if [ -d "$PROJECTS" ]; then
     # that tree, not the shared one; read only that one variable.
     base="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^CLAUDE_CONFIG_DIR=//p' | head -n1)"
     base="${base:+$base/projects}"; base="${base:-$PROJECTS}"
-    proj="$base/$(printf '%s' "$cwd" | tr '/' '-')"
+    proj="$base/$(printf '%s' "$cwd" | LC_ALL=C tr -c 'A-Za-z0-9' '-')"
     [ -d "$proj" ] || continue
     if [ -n "$(find -L "$proj" -name '*.jsonl' -mmin "-$IDLE_MIN" -print -quit 2>/dev/null)" ]; then
       say "skip: interactive session in $cwd (pid $pid) was active in the last ${IDLE_MIN} min"; exit 0

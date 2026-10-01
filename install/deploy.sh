@@ -40,7 +40,8 @@ echo "deploy.sh: exporting $BASE_BRANCH @ $SHORT_SHA ($MAIN_REPO)" >&2
 # this commit -- never against MAIN_REPO's working tree, which could be
 # dirty or mid-edit, and never against a stale prior export. ------------
 TEST_TMP="$(mktemp -d)"
-trap 'rm -rf "$TEST_TMP"' EXIT
+TEST_HOME=""
+trap 'rm -rf "$TEST_TMP" ${TEST_HOME:+"$TEST_HOME"}' EXIT
 git -C "$MAIN_REPO" archive "$SHA" | tar -x -C "$TEST_TMP"
 echo "deploy.sh: running unit tests against the clean export..." >&2
 # Belt-and-braces on top of the suite's own tests/__init__.py isolation
@@ -103,6 +104,8 @@ echo "deploy.sh: current -> $RELEASE_DIR" >&2
 # delete the one `current` points at even if clock skew put it out of
 # the newest-N window. ---------------------------------------------------
 CURRENT_REAL="$(readlink -f "$AIRLOCK_HOME/current")"
+# ls -t for newest-first by mtime; release names are short SHAs.
+# shellcheck disable=SC2010
 mapfile -t ALL_RELEASES < <(ls -1t "$RELEASES_DIR" 2>/dev/null | grep -v '^\.export-')
 if [ "${#ALL_RELEASES[@]}" -gt "$KEEP_RELEASES" ]; then
   for old in "${ALL_RELEASES[@]:$KEEP_RELEASES}"; do
