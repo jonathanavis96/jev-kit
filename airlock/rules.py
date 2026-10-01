@@ -500,8 +500,23 @@ def _is_safe_path(tok):
     return any(r.search(tok) for r in SAFE_PATH_RES)
 
 
-def _secret_path_in(tokens):
+_REDIR_SPLIT_RE = re.compile(r"\d*[<>]+&?")
+
+
+def _path_parts(tokens):
+    """Each token, and the paths glued to a redirection inside it: `<.env`
+    and `.env>/dev/stdout` are one word to `words()`, and the anchored
+    secret-path patterns saw neither `.env`."""
     for tok in tokens:
+        yield tok
+        if "<" in tok or ">" in tok:
+            for part in _REDIR_SPLIT_RE.split(tok):
+                if part and part != tok:
+                    yield part
+
+
+def _secret_path_in(tokens):
+    for tok in _path_parts(tokens):
         if tok.startswith("-"):
             continue
         if _is_safe_path(tok):
@@ -536,6 +551,47 @@ def _quiet_grep(args):
     return False
 
 
+_SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+_ASSIGN_BUILTINS = {"export", "local", "readonly", "declare", "typeset"}
+
+
+def _substituted_segments(command):
+    """Segments of every `$(...)` and backtick substitution in the command.
+    `echo "$(cat .env)"` prints the file, but its only segment is an echo."""
+    out = []
+    try:
+        command = strip_heredocs(command)
+        for m in _SUBST_RE.finditer(command):
+            # `KEY=$(cat ~/.config/jev-kit/env)` loads the value without
+            # printing it, which is what R1's own advice asks for.
+            before = split_segments(command[:m.start()])
+            toks = words(before[-1]) if before else []
+            if toks and all(_ASSIGN_RE.match(t) or t in _ASSIGN_BUILTINS for t in toks):
+                continue
+            inner = m.group(1) if m.group(1) is not None else m.group(2)
+            if inner.startswith("<"):
+                inner = "cat " + inner[1:]  # `$(<.env)` is bash for `$(cat .env)`
+            out.extend(split_segments(inner))
+    except Exception:
+        return []
+    return out
+
+
+def _reader_behind(prog, args):
+    """The command `xargs` or `find -exec` runs, when that is what reads the
+    file: `xargs cat .env` and `find . -name .env -exec cat {} +` print it
+    just as `cat .env` does."""
+    if prog == "xargs":
+        i = _first_positional(args, _XARGS_VALUE_OPTS)
+        if i is not None:
+            return args[i].rsplit("/", 1)[-1], args[i + 1:]
+    if prog == "find":
+        for i, a in enumerate(args):
+            if a in ("-exec", "-execdir", "-ok", "-okdir") and i + 1 < len(args):
+                return args[i + 1].rsplit("/", 1)[-1], args[:i] + args[i + 2:]
+    return prog, args
+
+
 def prefilter_secret(ctx):
     tool = ctx["tool_name"]
 
@@ -562,8 +618,8 @@ def prefilter_secret(ctx):
     if not command:
         return None
 
-    for seg in ctx["segments"]:
-        prog, args = program_of(seg)
+    for seg in ctx["segments"] + _substituted_segments(command):
+        prog, args = _reader_behind(*program_of(seg))
         if prog is None:
             continue
 
@@ -1388,7 +1444,7 @@ def prefilter_commit_secret(ctx):
         git_write = True
         hit = _secret_path_in(args[i + 1:])
         if hit:
-            return Match("`git %s` would stage a secret file (%s)" % (args[0], hit), R9_SUGGESTION)
+            return Match("`git %s` would stage a secret file (%s)" % (args[i], hit), R9_SUGGESTION)
 
     if not git_write:
         return None
