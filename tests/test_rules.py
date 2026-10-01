@@ -75,6 +75,24 @@ class TestR1Secret(unittest.TestCase):
             self.assertEqual(row["fires"], True, c)
             self.assertEqual(row["action"], "deny")
 
+    def test_reader_behind_xargs_find_redirect_or_substitution_denies(self):
+        for c in (
+            "xargs cat .env",
+            "xargs -n 1 cat ~/.config/jev-kit/env",
+            "find . -name .env -exec cat {} \\;",
+            "cat <.env",
+            "cat .env>/dev/stdout",
+            'echo "$(cat .env)"',
+            "echo `cat ~/.ssh/id_ed25519`",
+            'echo "$(<.env)"',
+        ):
+            row = self.assert_fires(c)
+            self.assertEqual(row["fires"], True, c)
+        for c in ("xargs rm < list", "find . -name .env -delete", "cat README.md>out",
+                  "echo $(date)", "KEY=$(cat ~/.config/jev-kit/env)",
+                  'export KEY="$(grep X .env | cut -d= -f2)"'):
+            self.assertEqual(fired(ctx_bash(c), self.RID), [], c)
+
     def test_echo_of_secret_variable_denies(self):
         row = self.assert_fires('echo "$TYPESAFE_API_KEY"')
         self.assertEqual(row["fires"], True)
@@ -407,6 +425,8 @@ class TestR3HostCapacity(unittest.TestCase):
             self.assertTrue(fired(ctx_bash(c), "R9-commit-secret"), c)
         for c in ("git -C repo add README.md", "git -C repo status .env"):
             self.assertEqual(fired(ctx_bash(c), "R9-commit-secret"), [], c)
+        self.assertIn("`git add`", fired(ctx_bash("git -C repo add .env"),
+                                          "R9-commit-secret")[0]["detail"])
 
     def test_questions_state_sent_to_jev_is_redacted(self):
         secret = "apikey_" + "S3cretValue0123456789"
