@@ -256,6 +256,19 @@ class TestR3HostCapacity(unittest.TestCase):
                   "apt-cache policy ripgrep", "chmod 600 ~/.config/airlock/env"):
             self.assertEqual(fired(ctx_bash(c), "R5-sudo"), [], c)
 
+    def test_r5_sudo_env_prefix_and_index_refresh(self):
+        """A named install stays allowed with a VAR=val prefix, sudo's own
+        option values, or an `apt-get update` in front of it; a bare update,
+        or an update in front of anything else, is still denied."""
+        for c in ("sudo DEBIAN_FRONTEND=noninteractive apt-get install -y jq",
+                  "sudo apt-get update && sudo apt-get install -y jq",
+                  "sudo -u root apt install jq"):
+            self.assertEqual(fired(ctx_bash(c), "R5-sudo"), [], c)
+        for c in ("sudo apt-get update", "sudo apt-get update && sudo rm -rf /etc/x",
+                  "sudo apt-get install", "sudo DEBIAN_FRONTEND=x systemctl restart y"):
+            rows = fired(ctx_bash(c), "R5-sudo")
+            self.assertTrue(rows and rows[0]["fires"] is True, c)
+
     R6_ON = {"R6-gui-or-browser": "deny"}
 
     def test_r6_gui(self):

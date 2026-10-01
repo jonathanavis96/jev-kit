@@ -940,9 +940,53 @@ R5_SUGGESTION = (
 )
 
 
+# sudo's own options that take a value as the NEXT token (`sudo -u root ...`).
+_SUDO_ARG_OPTS = {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"}
+_PKG_REFRESH = {"update"}
+
+
+def _sudo_rest(toks, idx):
+    """The command sudo runs: its own options, their values and any leading
+    VAR=val assignments (`sudo DEBIAN_FRONTEND=noninteractive apt-get ...`)
+    stripped, so the real program is rest[0]."""
+    i = idx + 1
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            i += 1
+            break
+        if t in _SUDO_ARG_OPTS:
+            i += 2
+            continue
+        if t.startswith("-") or _ASSIGN_RE.match(t):
+            i += 1
+            continue
+        break
+    return [t for t in toks[i:] if not t.startswith("-") or t in _PKG_SUBS]
+
+
+def _is_named_install(rest):
+    prog = rest[0].rsplit("/", 1)[-1] if rest else ""
+    return (prog in _PKG_INSTALLERS and len(rest) > 2 and rest[1] in _PKG_SUBS)
+
+
 def prefilter_sudo(ctx):
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
+    # `sudo apt-get update && sudo apt-get install -y jq` is ONE named install:
+    # the index refresh is part of it. Only allowed when the same command
+    # carries the named install itself.
+    has_named_install = False
+    for seg in ctx["segments"]:
+        prog0, _a = program_of(seg)
+        if prog0 != "sudo":
+            continue
+        toks0 = words(seg)
+        for i, t in enumerate(toks0):
+            if t.rsplit("/", 1)[-1] == "sudo":
+                if _is_named_install(_sudo_rest(toks0, i)):
+                    has_named_install = True
+                break
     for seg in ctx["segments"]:
         toks = words(seg)
         if not toks:
@@ -959,7 +1003,7 @@ def prefilter_sudo(ctx):
                 break
         if idx is None:
             continue
-        rest = [t for t in toks[idx + 1:] if not t.startswith("-") or t in _PKG_SUBS]
+        rest = _sudo_rest(toks, idx)
         flags = toks[idx + 1:]
 
         # any sudo touching a path under $HOME
@@ -972,10 +1016,11 @@ def prefilter_sudo(ctx):
                 )
 
         prog = rest[0].rsplit("/", 1)[-1] if rest else ""
-        if prog in _PKG_INSTALLERS:
-            subs = [t for t in rest[1:]]
-            if subs and subs[0] in _PKG_SUBS and len(subs) > 1:
-                continue  # named package install: allowed
+        if _is_named_install(rest):
+            continue  # named package install: allowed
+        if (prog in _PKG_INSTALLERS and len(rest) == 2 and rest[1] in _PKG_REFRESH
+                and has_named_install):
+            continue  # index refresh in front of a named install: allowed
         return Match(
             "`sudo %s` is not a named system package install" % (" ".join(rest[:3]) or "<nothing>"),
             R5_SUGGESTION,
