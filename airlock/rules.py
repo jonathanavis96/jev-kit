@@ -1517,8 +1517,10 @@ def prefilter_root_delete(ctx):
     for seg in segs:
         hit = _rd_hit(seg)
         if hit:
+            # strict: neither an `[airlock-ok: ...]` stamp nor the loop
+            # allowance (a repeat of a denied call passes) lets this through.
             return Match("`rm -r %s` would delete the whole filesystem or home directory" % hit,
-                         R7_ROOT_SUGGESTION)
+                         R7_ROOT_SUGGESTION, extra={"strict": True})
     return None
 
 

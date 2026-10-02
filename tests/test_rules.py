@@ -1358,3 +1358,7 @@ class RootDeleteDenyTests(unittest.TestCase):
         for cmd in ("git push --force", "git reset --hard", "rm -rf *", "rm -rf ."):
             self.assertFalse(self._deny(cmd), cmd)
             self.assertTrue([r for r in fired(ctx_bash(cmd), "R7-destructive") if r["fires"]], cmd)
+
+    def test_strict_so_no_stamp_or_repeat_gets_through(self):
+        m = rules.prefilter_root_delete(ctx_bash("rm -rf /"))
+        self.assertTrue(m.extra.get("strict"))
