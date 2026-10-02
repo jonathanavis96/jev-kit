@@ -1413,14 +1413,59 @@ _RD_VALUE_OPTS = {
 }
 _RD_SUDO_SHORT_VALUE = set("ugpCDhrtTUR")
 _RD_SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+# Compound-command words that put a command after them: `then rm -rf /`.
+_RD_KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until"}
+# Shell options that take the next word as their value: `bash -o pipefail -c`.
+_RD_SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+
+
+def _rd_unquote(tok):
+    """Bash quote removal for one word: `\\rm` is `rm`, `\\/` is `/`, `"/"*` is
+    `/*`. An escaped leading tilde is a file literally named `~`, so it is
+    kept escaped and never matches the home directory."""
+    out, i, n = [], 0, len(tok)
+    while i < n:
+        ch = tok[i]
+        if ch == "\\" and i + 1 < n:
+            if tok[i + 1] == "~" and i == 0:
+                out.append("\\~")
+            else:
+                out.append(tok[i + 1])
+            i += 2
+            continue
+        if ch not in "'\"":
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rd_shell_script(args):
+    """The script of `sh -c SCRIPT`, also when -c sits in a short-option
+    cluster (`bash -lc`, `sh -xc`). None when the shell runs no -c script."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in _RD_SHELL_VALUE_OPTS:
+            i += 2
+            continue
+        if a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            if "c" in a[1:]:
+                return " ".join(args[i + 1:]).strip("'\"")
+            i += 1
+            continue
+        if a.startswith("--") or a.startswith("+"):
+            i += 1
+            continue
+        return None
+    return None
 
 
 def _rd_command(toks, depth=0):
     """(program, args) behind assignments, wrappers and sudo, or the inner
     script's tokens for `sh -c`. Returns (None, []) when nothing runs."""
     while toks:
-        t = toks[0].lstrip("({!")
-        if not t:
+        t = _rd_unquote(toks[0].lstrip("({!"))
+        if not t or t in _RD_KEYWORDS:
             toks = toks[1:]
             continue
         if _ASSIGN_RE.match(t):
@@ -1482,9 +1527,8 @@ def _rd_root_or_home(a):
 
 def _rd_hit(seg, depth=0):
     prog, args = _rd_command(words(seg))
-    if prog in _RD_SHELLS and depth < 2 and "-c" in args:
-        i = args.index("-c")
-        script = " ".join(args[i + 1:]).strip("'\"")
+    script = _rd_shell_script(args) if prog in _RD_SHELLS and depth < 2 else None
+    if script is not None:
         for inner in split_segments(script):
             hit = _rd_hit(inner, depth + 1)
             if hit:
@@ -1496,6 +1540,7 @@ def _rd_hit(seg, depth=0):
                for a in args):
         return None
     for a in args:
+        a = _rd_unquote(a)
         if not a.startswith("-") and _rd_root_or_home(a):
             return a
     return None

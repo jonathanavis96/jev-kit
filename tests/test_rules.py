@@ -1350,6 +1350,27 @@ class RootDeleteDenyTests(unittest.TestCase):
                     "sh -c 'rm -rf /tmp/x'", "find / -name x"):
             self.assertFalse(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
 
+    def test_compound_command_keywords_do_not_hide_rm(self):
+        for cmd in ("if true; then rm -rf /*; fi", "for d in a; do rm -rf ~; done",
+                    "while true; do rm -rf ~/*; done", "if x; then :; else rm -rf ~; fi",
+                    "if x; then :; elif y; then rm -rf /; fi", "until false; do rm -rf /; done"):
+            self.assertTrue(self._deny(cmd), cmd)
+
+    def test_shell_c_in_an_option_cluster(self):
+        for cmd in ("bash -lc 'rm -rf ~'", "sh -xc 'rm -rf /*'", "bash -euc 'rm -rf /'",
+                    "bash --login -c 'rm -rf ~'", "bash -o pipefail -c 'rm -rf /'"):
+            self.assertTrue(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
+        for cmd in ("bash -lc 'rm -rf /tmp/x'", "bash script.sh -c 'rm -rf /'"):
+            self.assertFalse(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
+
+    def test_backslash_and_inner_quotes_are_removed(self):
+        for cmd in ("\\rm -rf ~", "\\rm -rf /", "rm -rf \\/", 'rm -rf "/"*', "rm -rf '/'*",
+                    "r\\m -rf /", 'rm -rf "$HOME"/*'):
+            self.assertTrue(self._deny(cmd), cmd)
+        # an escaped tilde is a file literally named ~, not the home directory
+        for cmd in ("rm -rf \\~", "rm -rf ./\\~"):
+            self.assertFalse(self._deny(cmd), cmd)
+
     def test_escaped_hash_is_not_a_comment(self):
         # bash reads `\ #` as one word, so the rm after it runs: never treat a
         # `#` after an escaped character as the start of a comment.
