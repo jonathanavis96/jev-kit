@@ -1245,7 +1245,8 @@ class TestR11Enforce(unittest.TestCase):
 
 
 class TestStrictIsR11Only(unittest.TestCase):
-    """Closing the two escapes is scoped to R11. Every other rule keeps both."""
+    """Closing the two escapes is scoped to R11 and R7-root-delete. Every other
+    rule keeps both."""
 
     def setUp(self):
         self.logged = []
@@ -1274,7 +1275,9 @@ class TestStrictIsR11Only(unittest.TestCase):
                     continue
                 if match is not None and match.extra.get("strict"):
                     strict.add(rule.id)
-        self.assertEqual(strict, {"R11-browse-via-jev"})
+        # R7-root-delete (2026-10-02): a deny that passes on the second try, or
+        # with a stamp, would not stop `rm -rf /` at all.
+        self.assertEqual(strict, {"R11-browse-via-jev", "R7-root-delete"})
 
     def _sudo(self, **ti):
         payload = {"session_id": "sess-strict", "cwd": "/tmp", "tool_name": "Bash",
