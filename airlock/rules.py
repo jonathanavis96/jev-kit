@@ -1450,8 +1450,12 @@ def _rd_shell_script(args):
             continue
         if a.startswith("-") and not a.startswith("--") and len(a) > 1:
             if "c" in a[1:]:
-                return " ".join(args[i + 1:]).strip("'\"")
-            i += 1
+                rest = args[i + 1:]
+                if rest and rest[0] == "--":
+                    rest = rest[1:]  # `bash -c -- 'script'`
+                return " ".join(rest).strip("'\"")
+            # a cluster ending in o/O takes the next word: `-euo pipefail`
+            i += 2 if a[-1] in "oO" else 1
             continue
         if a.startswith("--") or a.startswith("+"):
             i += 1
@@ -1467,6 +1471,13 @@ def _rd_command(toks, depth=0):
         t = _rd_unquote(toks[0].lstrip("({!"))
         if not t or t in _RD_KEYWORDS:
             toks = toks[1:]
+            continue
+        if t == "case":
+            # `case WORD in PATTERN) cmd`: the command starts after the pattern
+            toks = toks[toks.index("in") + 1:] if "in" in toks else []
+            continue
+        if t.endswith(")") and "(" not in t:
+            toks = toks[1:]  # a case pattern: `x)`, `a|b)`
             continue
         if _ASSIGN_RE.match(t):
             toks = toks[1:]
@@ -1536,11 +1547,11 @@ def _rd_hit(seg, depth=0):
         return None
     if prog != "rm":
         return None
+    args = [_rd_unquote(a) for a in args]
     if not any(a == "--recursive" or a.startswith("-") and not a.startswith("--") and "r" in a.lower()
                for a in args):
         return None
     for a in args:
-        a = _rd_unquote(a)
         if not a.startswith("-") and _rd_root_or_home(a):
             return a
     return None

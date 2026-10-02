@@ -598,10 +598,11 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
             return False
 
     # A `strict` match closes both per-call ways past a deny: the
-    # `[airlock-ok: ...]` stamp and the loop allowance. Only R11 sets it, and
-    # only because both were measured being used to keep browsing on Playwright
-    # (airlock/rules.py, prefilter_browser_driving). Every other rule keeps
-    # both, unchanged.
+    # `[airlock-ok: ...]` stamp and the loop allowance. Two rules set it. R11,
+    # because both were measured being used to keep browsing on Playwright
+    # (airlock/rules.py, prefilter_browser_driving). R7-root-delete, because a
+    # recursive delete of / or the home directory must never pass on a stamp
+    # the model writes itself. Every other rule keeps both, unchanged.
     strict = bool(match.extra.get("strict"))
 
     if override_reason is not None:

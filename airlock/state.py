@@ -17,7 +17,7 @@ consequence is one extra deny gets emitted rather than a wrong one being
 silently allowed through loop protection.
 
 A rule whose match carries `strict` never consults this file, though it still
-writes to it. Only R11 is strict; airlock/enforce.py says why.
+writes to it. R11 and R7-root-delete are strict; airlock/enforce.py says why.
 """
 import json
 import os

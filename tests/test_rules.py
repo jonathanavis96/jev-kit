@@ -1390,6 +1390,15 @@ class RootDeleteDenyTests(unittest.TestCase):
         for cmd in ("rm -rf \\~", "rm -rf ./\\~"):
             self.assertFalse(self._deny(cmd), cmd)
 
+    def test_follow_up_shapes(self):
+        for cmd in ("bash -euo pipefail -c 'rm -rf ~'", "bash -eo pipefail -c 'rm -rf /'",
+                    "bash -c -- 'rm -rf /'", "case x in x) rm -rf /;; esac",
+                    "case $1 in a) :;; b) rm -rf ~;; esac", "rm \\-rf /"):
+            self.assertTrue(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
+        for cmd in ("bash -euo pipefail -c 'rm -rf /tmp/x'", "case x in x) rm -rf build;; esac",
+                    "bash -eo pipefail script.sh"):
+            self.assertFalse(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
+
     def test_escaped_hash_is_not_a_comment(self):
         # bash reads `\ #` as one word, so the rm after it runs: never treat a
         # `#` after an escaped character as the start of a comment.
