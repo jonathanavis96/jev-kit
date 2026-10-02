@@ -1441,33 +1441,39 @@ def _rd_unquote(tok):
 
 def _rd_shell_script(args):
     """The script of `sh -c SCRIPT`, also when -c sits in a short-option
-    cluster (`bash -lc`, `sh -xc`). None when the shell runs no -c script."""
-    i = 0
+    cluster (`bash -lc`, `sh -xc`). Like bash, options are read up to the
+    first non-option word, and a cluster ending in o/O takes the next word as
+    its value (`-euo pipefail`, `-co pipefail SCRIPT`). None when the shell
+    runs no -c script."""
+    has_c, i = False, 0
     while i < len(args):
         a = args[i]
+        if a == "--":
+            i += 1  # `bash -c -- 'script'`
+            break
         if a in _RD_SHELL_VALUE_OPTS:
             i += 2
             continue
         if a.startswith("-") and not a.startswith("--") and len(a) > 1:
-            if "c" in a[1:]:
-                rest = args[i + 1:]
-                if rest and rest[0] == "--":
-                    rest = rest[1:]  # `bash -c -- 'script'`
-                return " ".join(rest).strip("'\"")
-            # a cluster ending in o/O takes the next word: `-euo pipefail`
+            has_c = has_c or "c" in a[1:]
             i += 2 if a[-1] in "oO" else 1
             continue
-        if a.startswith("--") or a.startswith("+"):
+        if a.startswith("--") or (a.startswith("+") and len(a) > 1):
             i += 1
             continue
+        break
+    if not has_c:
         return None
-    return None
+    return " ".join(args[i:]).strip("'\"")
 
 
 def _rd_command(toks, depth=0):
     """(program, args) behind assignments, wrappers and sudo, or the inner
     script's tokens for `sh -c`. Returns (None, []) when nothing runs."""
     while toks:
+        if len(toks) > 1 and toks[1] == ")":
+            toks = toks[2:]  # a case pattern with a space before the paren: `x ) cmd`
+            continue
         t = _rd_unquote(toks[0].lstrip("({!"))
         if not t or t in _RD_KEYWORDS:
             toks = toks[1:]
@@ -1548,11 +1554,14 @@ def _rd_hit(seg, depth=0):
     if prog != "rm":
         return None
     args = [_rd_unquote(a) for a in args]
-    if not any(a == "--recursive" or a.startswith("-") and not a.startswith("--") and "r" in a.lower()
-               for a in args):
+    # After `--` every word is a file name, `-r` included.
+    end = args.index("--") if "--" in args else len(args)
+    opts = [a for a in args[:end] if a.startswith("-")]
+    operands = [a for a in args[:end] if not a.startswith("-")] + args[end + 1:]
+    if not any(a == "--recursive" or not a.startswith("--") and "r" in a.lower() for a in opts):
         return None
-    for a in args:
-        if not a.startswith("-") and _rd_root_or_home(a):
+    for a in operands:
+        if _rd_root_or_home(a):
             return a
     return None
 

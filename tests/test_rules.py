@@ -1399,6 +1399,22 @@ class RootDeleteDenyTests(unittest.TestCase):
                     "bash -eo pipefail script.sh"):
             self.assertFalse(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
 
+    def test_case_pattern_with_a_space_before_the_paren(self):
+        for cmd in ("case x in x ) rm -rf /;; esac", "case $1 in a) :;; b ) rm -rf ~;; esac"):
+            self.assertTrue(self._deny(cmd), cmd)
+
+    def test_c_cluster_ending_in_o_takes_the_option_value_first(self):
+        for cmd in ("bash -co pipefail 'rm -rf /'", "bash -eco pipefail 'rm -rf ~'"):
+            self.assertTrue(self._deny(cmd, overrides=self.LIVE_LIKE), cmd)
+        self.assertFalse(self._deny("bash -co pipefail 'rm -rf /tmp/x'", overrides=self.LIVE_LIKE))
+
+    def test_flags_stop_at_double_dash(self):
+        # after `--`, rm reads `-r` as a file name, not the recursive flag
+        for cmd in ("rm -- -r /", "rm -- '-r' /", "rm -f -- -rf ~"):
+            self.assertFalse(self._deny(cmd), cmd)
+        for cmd in ("rm -rf -- /", "rm -r -- ~", "rm / -rf"):
+            self.assertTrue(self._deny(cmd), cmd)
+
     def test_escaped_hash_is_not_a_comment(self):
         # bash reads `\ #` as one word, so the rm after it runs: never treat a
         # `#` after an escaped character as the start of a comment.
