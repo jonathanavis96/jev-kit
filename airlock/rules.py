@@ -49,7 +49,7 @@ import json
 import os
 import re
 
-from . import keyfile, paths
+from . import keyfile, paths, scope
 from .headless import cpu_count, is_small_host
 from .platform_compat import is_windows
 
@@ -129,30 +129,17 @@ class Rule:
 _SKIP_PREFIX = {"nice", "time", "command", "exec", "builtin", "stdbuf", "nohup", "ionice"}
 
 
-_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z_0-9]*)\1")
-
-
 def strip_heredocs(command):
     """Drop heredoc BODIES from a command line, keeping the command that owns
     them. A heredoc body is data (a file being written, a prompt, a note), not
     something the shell executes, so words inside it must never trip a code
     rule. Seen live on 2026-09-19: a note containing the word for the
     privilege-elevation command was blocked as if it were that command.
-    Never raises; on anything odd it returns the input unchanged."""
+    The one implementation is airlock/scope.py's, which knows quoting and
+    here-strings. Never raises; on anything odd it returns the input
+    unchanged."""
     try:
-        if "<<" not in (command or ""):
-            return command
-        out = []
-        pending = []
-        for line in command.split("\n"):
-            if pending:
-                if line.strip() == pending[0]:
-                    pending.pop(0)
-                continue
-            out.append(line)
-            for m in _HEREDOC_RE.finditer(line):
-                pending.append(m.group(2))
-        return "\n".join(out)
+        return scope.strip_heredocs(command)
     except Exception:
         return command
 

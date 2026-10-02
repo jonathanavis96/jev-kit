@@ -72,6 +72,8 @@ def call_jev(api_key, state, questions, timeout=DEFAULT_TIMEOUT):
         data = json.loads(raw.decode("utf-8"))
     except Exception as exc:
         raise TypeSafeError("bad JSON response: %s" % exc) from None
+    if not isinstance(data, dict):
+        raise TypeSafeError("response is not a JSON object: %s" % type(data).__name__)
     return data, latency_ms
 
 

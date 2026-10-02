@@ -604,7 +604,8 @@ def should_show(state, key, repeat_s, now):
     if not isinstance(shown, dict):
         return True
     ts = shown.get(key)
-    if not isinstance(ts, (int, float)):
+    if not isinstance(ts, (int, float)) or ts > now:
+        # A stamp from the future (the clock stepped back) proves nothing.
         return True
     return (now - ts) >= repeat_s
 
@@ -627,62 +628,34 @@ def check_and_record(paths_mod, key, repeat_s, now=None):
     then both write. Any failure at all means "show it": a de-duplicator that
     fails closed would swallow the one message this component exists to send.
     """
-    from airlock import platform_compat
+    from pathlib import Path
+
+    from airlock import platform_compat, state as state_mod
 
     now = time.time() if now is None else now
     path = _state_path(paths_mod)
     try:
-        state_dir = paths_mod.state_dir()
-        state_dir.mkdir(parents=True, exist_ok=True)
-        platform_compat.restrict_path(state_dir, 0o700)
+        fd = state_mod.open_locked(Path(path), platform_compat.LOCK_EXCLUSIVE)
     except Exception:
         return True
 
-    fd = None
     try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
-        platform_compat.lock_file(fd, platform_compat.LOCK_EXCLUSIVE)
-    except Exception:
-        if fd is not None:
-            try:
-                os.close(fd)
-            except Exception:
-                pass
-        return True
-
-    try:
-        try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            raw = os.read(fd, 1024 * 1024)
-            state = json.loads(raw.decode("utf-8")) if raw else {}
-            if not isinstance(state, dict):
-                state = {}
-        except Exception:
-            state = {}
-
+        state = state_mod.load(fd)
         show = should_show(state, key, repeat_s, now)
         if show:
-            state.setdefault("shown", {})
-            if not isinstance(state["shown"], dict):
+            if not isinstance(state.get("shown"), dict):
                 state["shown"] = {}
             state["shown"][key] = now
             state["last_key"] = key
             _prune(state, now)
             try:
-                blob = json.dumps(state).encode("utf-8")
-                os.ftruncate(fd, 0)
-                os.lseek(fd, 0, os.SEEK_SET)
-                os.write(fd, blob)
+                state_mod.save(fd, state)
             except Exception:
                 pass
         return show
     finally:
         try:
-            platform_compat.unlock_file(fd)
-        except Exception:
-            pass
-        try:
-            os.close(fd)
+            state_mod.close(fd)
         except Exception:
             pass
         try:

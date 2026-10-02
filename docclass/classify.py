@@ -194,11 +194,24 @@ def _state(text, family_name=None, family_what=None):
 # --- the classifier ----------------------------------------------------------
 
 def _answer(result, key):
-    answer = ((result or {}).get("answers") or {}).get(key) or {}
+    """(choice, confidence) from one answer. A choice that is not a string
+    reads as None; a confidence that is missing, NaN or outside [0, 1]
+    reads as 0.0, so it can never clear the gate (NaN compares False with
+    everything, so `nan < gate` used to let it through)."""
+    try:
+        answer = result["answers"][key]
+    except Exception:
+        answer = None
+    if not isinstance(answer, dict):
+        answer = {}
     choice = answer.get("choice")
+    if not isinstance(choice, str):
+        choice = None
     try:
         confidence = float(answer.get("confidence"))
     except (TypeError, ValueError):
+        confidence = 0.0
+    if not 0.0 <= confidence <= 1.0:
         confidence = 0.0
     return choice, confidence
 

@@ -123,9 +123,7 @@ def rung_for_agent_type(subagent_type, path=None):
     for rung in rungs:
         if t in rung:
             return rung[0]
-    for prefix in DIRECTOR_PREFIXES:
-        if t.startswith(prefix):
-            return rungs[max(0, len(rungs) - _UNKNOWN_RUNG_FROM_TOP)][0]
+    # A DIRECTOR_PREFIXES name lands here too: it IS the Opus-level rung.
     return rungs[max(0, len(rungs) - _UNKNOWN_RUNG_FROM_TOP)][0]
 
 

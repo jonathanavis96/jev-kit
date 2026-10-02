@@ -77,6 +77,15 @@ class TestRedactionComesFirst(unittest.TestCase):
         record = lt.triage_line("x" * 50000, use_model=False)
         self.assertLessEqual(len(record["line"]), lt.MAX_LINE_CHARS)
 
+    def test_a_secret_straddling_the_cut_is_still_redacted(self):
+        """Truncating before redacting cut `sk-...` to a stub too short for
+        its pattern, and the stub went to the model in clear."""
+        ask = RecordingAsk()
+        line = "a" * (lt.MAX_LINE_CHARS - 6) + " sk-abcdefghijklmnop"
+        lt.Triager(ask=ask).triage(line)
+        sent = ask.bodies[0]["state"]["line"]
+        self.assertNotIn("sk-ab", sent)
+
 
 class TestLocalRulesComeSecond(unittest.TestCase):
     def _label(self, line):
@@ -169,6 +178,18 @@ class TestTheCache(unittest.TestCase):
         t.triage("rejected token apikey_aaaaaaaaaaaaaaaaaaaa for tenant x")
         t.triage("rejected token apikey_bbbbbbbbbbbbbbbbbbbb for tenant x")
         self.assertEqual(len(ask.bodies), 1)
+
+    def test_the_cache_is_bounded(self):
+        """A long journalctl stream of unique lines must not grow memory
+        without limit; the oldest entries go first."""
+        ask = RecordingAsk()
+        t = lt.Triager(ask=ask)
+        with mock.patch.object(lt, "CACHE_MAX_ENTRIES", 3):
+            for i in range(5):
+                t.triage("unruled line number %d" % i)
+            self.assertEqual(len(t._cache), 3)
+            t.triage("unruled line number 4")
+        self.assertEqual(t.stats["cached"], 1)
 
     def test_cache_can_be_turned_off(self):
         ask = RecordingAsk()

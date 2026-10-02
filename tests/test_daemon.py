@@ -98,6 +98,27 @@ class TestConnectionPool(unittest.TestCase):
         self.assertFalse(reused)  # had to reconnect, so not a reuse
         self.assertTrue(dead_conn.closed)
 
+    def test_a_timeout_is_not_retried(self):
+        """A read timeout means the API is slow, not that the socket died.
+        Retrying doubles the wait past the hook's own socket timeout and
+        pays for the judgement twice. The slow connection is dropped so the
+        next request starts clean."""
+        slow_conn = _FakeConnection([
+            lambda: (_ for _ in ()).throw(TimeoutError("timed out")),
+        ])
+        made = []
+
+        def factory(timeout_s):
+            made.append(1)
+            return slow_conn
+
+        pool = daemon.ConnectionPool(size=1, connection_factory=factory)
+        with self.assertRaises(TimeoutError):
+            pool.request("/v1/systemone", b"{}", {}, 5)
+        self.assertEqual(len(made), 1)
+        self.assertTrue(slow_conn.closed)
+        self.assertIsNone(pool.slots[0].conn)
+
     def test_raises_if_retry_also_fails(self):
         dead_conn = _FakeConnection([
             lambda: (_ for _ in ()).throw(ConnectionResetError("gone")),

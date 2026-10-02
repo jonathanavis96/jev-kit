@@ -127,6 +127,13 @@ class TestBrowseState(BrowseStateCase):
             self.assertFalse(browse_state.unlocked("s1"))
             self.assertFalse(browse_state.record_gave_up("s2", "blocked"))
 
+    def test_a_row_stamped_in_the_future_does_not_unlock(self):
+        """A clock stepped backwards (or a hand-edited ts) must not leave the
+        door open forever: a negative age reads as stale."""
+        browse_state.record_gave_up("s1", "blocked")
+        with mock.patch("time.time", return_value=time.time() - 7200):
+            self.assertFalse(browse_state.unlocked("s1"))
+
     def test_corrupt_json_reads_as_locked_and_never_raises(self):
         browse_state.STATE_DIR.mkdir(parents=True, exist_ok=True)
         browse_state.STATE_FILE.write_text("{not json")

@@ -24,6 +24,9 @@ from airlock import redact as redact_mod
 LABELS = ("investigate", "attention", "routine", "noise", "unclear")
 
 MAX_LINE_CHARS = 2000
+# Distinct redacted lines remembered per Triager. A long stream of unique
+# lines would otherwise grow the cache without limit; oldest go first.
+CACHE_MAX_ENTRIES = 10000
 
 
 # --- local rules -------------------------------------------------------------
@@ -200,8 +203,9 @@ class Triager:
     # -- step 1 ---------------------------------------------------------------
     def _redact(self, line):
         """The only place raw text is touched. Everything after this point
-        works on the return value."""
-        return redact_mod.redact((line or "")[:MAX_LINE_CHARS])
+        works on the return value. Redact the whole line, THEN cut it: cutting
+        first can leave a secret's stub too short for its pattern."""
+        return (redact_mod.redact(line or "") or "")[:MAX_LINE_CHARS]
 
     # -- step 2 ---------------------------------------------------------------
     def _protected(self, text):
@@ -248,6 +252,8 @@ class Triager:
             # jevlogs' trick: caching the answer rather than the decision means
             # changing a threshold later re-decides old lines correctly.
             self._cache[key] = (label, confidence)
+            while len(self._cache) > CACHE_MAX_ENTRIES:
+                del self._cache[next(iter(self._cache))]
         return label, "model", confidence
 
     def triage(self, line):

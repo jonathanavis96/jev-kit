@@ -217,6 +217,19 @@ class TestTheAwkwardCases(unittest.TestCase):
         out = dc.classify_page("x", TAXONOMY, ask=NoConfidence())
         self.assertEqual(out["status"], "needs_review")
 
+    def test_a_nan_confidence_does_not_clear_the_gate(self):
+        """NaN compares False with everything, so `nan < gate` let it through."""
+        for conf in ("nan", float("nan"), "inf"):
+            ask = _ask(("family", "invoice", conf))
+            self.assertEqual(dc.classify_page("x", TAXONOMY, ask=ask)["status"],
+                             "needs_review", conf)
+
+    def test_a_wrong_shaped_answer_is_reviewed_not_crashed(self):
+        for answer in ([1], "invoice", {"choice": ["invoice"], "confidence": 0.99}):
+            out = dc.classify_page("x", TAXONOMY,
+                                   ask=lambda body, a=answer: {"answers": {"family": a}})
+            self.assertEqual(out["status"], "needs_review")
+
     def test_a_junk_response_is_reviewed_not_crashed(self):
         for response in ({}, {"answers": {}}, {"answers": {"family": None}}, None):
             out = dc.classify_page("x", TAXONOMY, ask=lambda body, r=response: r)

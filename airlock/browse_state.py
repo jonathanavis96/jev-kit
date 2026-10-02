@@ -34,12 +34,11 @@ worked around: the id in the payload is the only handle a hook gets, and an
 agent that had to give up on `browse` is evidence about the task, not about
 which agent asked.
 """
-import json
-import os
 import time
 
 from . import paths
 from . import platform_compat
+from . import state
 
 STATE_DIR = paths.state_dir()
 STATE_FILE = STATE_DIR / "browse_unlock.json"
@@ -57,47 +56,19 @@ GAVE_UP_STATUSES = frozenset(("blocked", "error"))
 _GOAL_LIMIT = 300
 
 
-def _ensure_dir():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    platform_compat.restrict_path(STATE_DIR, 0o700)
-
-
 def _open_locked(lock_kind):
-    _ensure_dir()
-    # O_BINARY is Windows-only and 0 on POSIX (see airlock/log.py): the file
-    # is truncated and seeked by offset, so newline translation would corrupt
-    # it. Same call shape as airlock/state.py, deliberately.
-    fd = os.open(str(STATE_FILE),
-                 os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
-    platform_compat.lock_file(fd, lock_kind)
-    return fd
+    return state.open_locked(STATE_FILE, lock_kind)
 
 
-def _close(fd):
-    platform_compat.unlock_file(fd)
+def _expired(row, now, window_s=UNLOCK_WINDOW_S):
+    """True unless row carries a timestamp within the last window_s. A
+    timestamp in the future (clock stepped back, hand edit) is expired too,
+    or the door would stay open indefinitely."""
     try:
-        os.close(fd)
+        age = now - float(row.get("ts"))
     except Exception:
-        pass
-
-
-def _load(fd):
-    try:
-        os.lseek(fd, 0, os.SEEK_SET)
-        raw = os.read(fd, 10 * 1024 * 1024)
-        if not raw:
-            return {}
-        data = json.loads(raw.decode("utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save(fd, data):
-    raw = json.dumps(data).encode("utf-8")
-    os.ftruncate(fd, 0)
-    os.lseek(fd, 0, os.SEEK_SET)
-    os.write(fd, raw)
+        return True
+    return not 0 <= age <= window_s
 
 
 def _prune(data, now):
@@ -105,11 +76,7 @@ def _prune(data, now):
     so nothing here outlives its usefulness by even a minute."""
     for sess in list(data.keys()):
         row = data.get(sess)
-        try:
-            stale = not isinstance(row, dict) or (now - float(row.get("ts"))) > UNLOCK_WINDOW_S
-        except Exception:
-            stale = True
-        if stale:
+        if not isinstance(row, dict) or _expired(row, now):
             del data[sess]
     return data
 
@@ -130,7 +97,7 @@ def record_gave_up(session_id, status, goal=None, url=None):
     except Exception:
         return False
     try:
-        data = _load(fd)
+        data = state.load(fd)
         now = time.time()
         data = _prune(data, now)
         row = {"ts": now, "status": status}
@@ -139,11 +106,11 @@ def record_gave_up(session_id, status, goal=None, url=None):
         if url:
             row["url"] = str(url)[:_GOAL_LIMIT]
         data[session_id or ""] = row
-        _save(fd, data)
+        state.save(fd, data)
     except Exception:
         return False
     finally:
-        _close(fd)
+        state.close(fd)
     return True
 
 
@@ -155,17 +122,12 @@ def recent_give_up(session_id, window_s=UNLOCK_WINDOW_S):
     except Exception:
         return None
     try:
-        data = _load(fd)
+        data = state.load(fd)
     finally:
-        _close(fd)
+        state.close(fd)
 
     row = data.get(session_id or "")
-    if not isinstance(row, dict):
-        return None
-    try:
-        if (time.time() - float(row.get("ts"))) > window_s:
-            return None
-    except Exception:
+    if not isinstance(row, dict) or _expired(row, time.time(), window_s):
         return None
     return row
 
@@ -183,17 +145,17 @@ def claim_announcement(session_id):
     except Exception:
         return False
     try:
-        data = _load(fd)
+        data = state.load(fd)
         row = data.get(session_id or "")
         if not isinstance(row, dict) or row.get("announced"):
             return False
         row["announced"] = True
-        _save(fd, data)
+        state.save(fd, data)
         return True
     except Exception:
         return False
     finally:
-        _close(fd)
+        state.close(fd)
 
 
 def unlocked(session_id, window_s=UNLOCK_WINDOW_S):

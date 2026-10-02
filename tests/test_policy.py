@@ -181,6 +181,12 @@ class TestMargin(unittest.TestCase):
         self.assertIsNone(policy.compute_margin({}))
         self.assertIsNone(policy.compute_margin(None))
 
+    def test_a_nan_or_junk_answer_never_clears_a_bar(self):
+        nan = float("nan")
+        for conf, margin in ((nan, 0.9), (0.95, nan), ("0.95", 0.9), (True, 0.9)):
+            self.assertFalse(policy.meets_deny_bar(conf, margin), (conf, margin))
+            self.assertFalse(policy.meets_rewrite_bar(conf, margin), (conf, margin))
+
     def test_meets_deny_bar_requires_both(self):
         self.assertTrue(policy.meets_deny_bar(0.9, 0.5))
         self.assertFalse(policy.meets_deny_bar(0.9, 0.3))

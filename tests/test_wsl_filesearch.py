@@ -945,6 +945,11 @@ class SonnetReviewRoundTwo(unittest.TestCase):
         self.assertTrue(policy.command_already_uses_indexed_search(
             command, windows=False, wsl=True))
 
+    def test_here_string_opens_no_heredoc(self):
+        from airlock import scope
+        self.assertEqual(scope.shell_segments('grep a <<< "$x"\nfind / -name y'),
+                         [["grep", "a", "<<<", "$x"], ["find", "/", "-name", "y"]])
+
     def test_heredoc_marker_inside_a_quoted_argument_opens_nothing(self):
         command = 'find /mnt/c -name "a <<EOF b"'
         self.assertFalse(policy.command_already_uses_indexed_search(

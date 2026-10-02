@@ -90,6 +90,10 @@ def _prompt_text(row):
     if row.get("isSidechain"):
         # A sub-agent's own prompt. The sub-agent is not the user.
         return None
+    if row.get("isMeta"):
+        # Text Claude Code injected in the user's slot: a skill body, hook
+        # feedback, a local-command caveat. It came from a file or a hook.
+        return None
     message = row.get("message")
     if not isinstance(message, dict):
         return None

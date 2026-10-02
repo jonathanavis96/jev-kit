@@ -624,6 +624,15 @@ class QuotedTextAndHeredocTests(unittest.TestCase):
         cmd = "cat > /tmp/a <<EOF\nhello\nEOF\nsudo systemctl stop x"
         self.assertIn("R5-sudo", self._matches(cmd))
 
+    def test_here_string_opens_no_heredoc(self):
+        """`<<<word` is a here-string, not a heredoc: nothing after it is
+        data, so the next line is a command and must be checked."""
+        self.assertIn("R5-sudo", self._matches("cat <<<EOF\nsudo systemctl stop x\nEOF"))
+        self.assertIn("R5-sudo", self._matches('grep a <<< "$x"\nsudo systemctl stop x'))
+
+    def test_heredoc_marker_inside_quotes_opens_nothing(self):
+        self.assertIn("R5-sudo", self._matches('echo "a <<EOF"\nsudo systemctl stop x\nEOF'))
+
     def test_named_package_install_still_allowed(self):
         self.assertNotIn("R5-sudo", self._matches("sudo apt-get install -y ripgrep"))
 

@@ -32,11 +32,16 @@ def compute_margin(probabilities):
 def meets_deny_bar(confidence, margin):
     """Shared deny gate for every guard: high confidence is not enough on its
     own -- the top option must also clearly beat the runner-up."""
-    if confidence is None or confidence < CONFIDENCE_THRESHOLD:
+    return _at_least(confidence, CONFIDENCE_THRESHOLD) and _at_least(margin, MARGIN_THRESHOLD)
+
+
+def _at_least(value, threshold):
+    """value >= threshold for a real number only. None, NaN and anything
+    non-numeric are False: NaN compares False with everything, so a plain
+    `value < threshold` check let a NaN answer clear a deny bar."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    if margin is None or margin < MARGIN_THRESHOLD:
-        return False
-    return True
+    return value >= threshold
 
 # --- Agent tier guard --------------------------------------------------------
 #
@@ -231,11 +236,8 @@ def rewrite_enabled():
 
 
 def meets_rewrite_bar(confidence, margin):
-    if confidence is None or confidence < REWRITE_CONFIDENCE_THRESHOLD:
-        return False
-    if margin is None or margin < REWRITE_MARGIN_THRESHOLD:
-        return False
-    return True
+    return (_at_least(confidence, REWRITE_CONFIDENCE_THRESHOLD)
+            and _at_least(margin, REWRITE_MARGIN_THRESHOLD))
 
 
 def tier_rewrite_target(tier_entry):

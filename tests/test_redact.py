@@ -47,6 +47,77 @@ class TestRedact(unittest.TestCase):
         out = redact.redact("mysql --password hunter2secret")
         self.assertNotIn("hunter2secret", out)
 
+    def test_password_in_json_or_yaml(self):
+        for text in ('{"password": "hunter2secret"}',
+                     "password: hunter2secret",
+                     "db_password: hunter2secret"):
+            self.assertNotIn("hunter2secret", redact.redact(text), text)
+
+    def test_generic_secret_with_colon(self):
+        for text in ('{"api_key": "xyz987fooBAR"}',
+                     "X-Auth-Token: xyz987fooBAR",
+                     "client_secret : xyz987fooBAR"):
+            self.assertNotIn("xyz987fooBAR", redact.redact(text), text)
+
+    def test_numeric_counters_under_token_keys_are_kept(self):
+        for text in ("max_tokens: 4096", "inputTokens: 123",
+                     '{"outputTokens": 77}', "token_count=12",
+                     "secret_size: 2048", "token_ms: 15"):
+            self.assertEqual(redact.redact(text), text, text)
+
+    def test_secret_value_under_counter_key_still_redacted(self):
+        for text in ("max_tokens: xyz987fooBAR", "token_count=xyz987fooBAR",
+                     '{"inputTokens": "xyz987fooBAR"}'):
+            self.assertNotIn("xyz987fooBAR", redact.redact(text), text)
+
+    def test_counter_word_inside_another_word_does_not_exempt(self):
+        # ACCOUNT and DISCOUNT contain "count"; the key's last word is what
+        # decides, and here it names the secret
+        for text, secret in (("export BANK_ACCOUNT_TOKEN=99887766", "99887766"),
+                             ("DISCOUNT_API_KEY=1234567890", "1234567890"),
+                             ("account_secret: 552901", "552901"),
+                             ("ACCOUNT_PASSWORD=4242", "4242"),
+                             ("resizeToken: 31337", "31337")):
+            self.assertNotIn(secret, redact.redact(text), text)
+
+    def test_numeric_value_under_secret_key_still_redacted(self):
+        for text in ("password: 12345678", "api_key=987654321"):
+            self.assertNotIn("987654321" if "api" in text else "12345678",
+                             redact.redact(text), text)
+
+    def test_colon_match_does_not_cross_newline(self):
+        for key in ("password", "api_key", "X-Auth-Token"):
+            out = redact.redact("%s:\nnextline stays" % key)
+            self.assertIn("nextline stays", out, out)
+
+    def test_json_key_is_kept(self):
+        out = redact.redact('{"api_key": "abc", "model": "x"}')
+        self.assertEqual(out, '{"api_key": "[REDACTED]", "model": "x"}')
+        out = redact.redact('{"password": "hunter2secret"}')
+        self.assertEqual(out, '{"password": "[REDACTED]"}')
+
+    def test_redacted_json_still_parses(self):
+        import json
+        doc = {"api_key": "sk_live_" + "Q" * 12, "client_secret": "xyz987fooBAR",
+               "password": "hunter2 secret", "X-Auth-Token": 123456789,
+               "max_tokens": 4096, "model": "x"}
+        out = redact.redact(json.dumps(doc))
+        parsed = json.loads(out)
+        self.assertEqual(parsed["max_tokens"], 4096)
+        self.assertEqual(parsed["model"], "x")
+        for key in ("api_key", "client_secret", "password", "X-Auth-Token"):
+            self.assertEqual(parsed[key], redact.REDACTED, key)
+        self.assertNotIn("hunter2", out)
+        self.assertNotIn("xyz987fooBAR", out)
+
+    def test_a_long_unbroken_word_is_linear(self):
+        """The generic NAME=value pattern retried from every character of a
+        long word, quadratic: 20k chars took ~12 s on the hook's hot path."""
+        import time
+        start = time.monotonic()
+        redact.redact("x" * 50000)
+        self.assertLess(time.monotonic() - start, 1.0)
+
     def test_generic_secret_env(self):
         out = redact.redact("MY_APP_SECRET_TOKEN=abc123def456")
         self.assertNotIn("abc123def456", out)

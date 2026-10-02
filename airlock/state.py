@@ -39,23 +39,33 @@ def _key_str(key):
     return "%s\x00%s" % (kind, value)
 
 
-def _ensure_dir():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    platform_compat.restrict_path(STATE_DIR, 0o700)
+def ensure_dir(state_dir):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    platform_compat.restrict_path(state_dir, 0o700)
 
 
-def _open_locked(lock_kind):
-    _ensure_dir()
+def open_locked(state_file, lock_kind):
+    """Open (creating, mode 600) and lock a JSON state file. Shared with
+    airlock/browse_state.py, which keeps its own file under the same rules."""
+    ensure_dir(state_file.parent)
     # O_BINARY is a Windows-only flag and 0 on POSIX (see airlock/log.py):
     # this file is seeked and truncated by offset, so text-mode newline
     # translation would corrupt it outright.
-    fd = os.open(str(STATE_FILE),
+    fd = os.open(str(state_file),
                  os.O_CREAT | os.O_RDWR | getattr(os, "O_BINARY", 0), 0o600)
     platform_compat.lock_file(fd, lock_kind)
     return fd
 
 
-def _load(fd):
+def close(fd):
+    platform_compat.unlock_file(fd)
+    try:
+        os.close(fd)
+    except Exception:
+        pass
+
+
+def load(fd):
     try:
         os.lseek(fd, 0, os.SEEK_SET)
         raw = os.read(fd, 10 * 1024 * 1024)
@@ -67,11 +77,26 @@ def _load(fd):
         return {}
 
 
-def _save(fd, data):
+def save(fd, data):
     raw = json.dumps(data).encode("utf-8")
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, raw)
+
+
+def _ensure_dir():
+    ensure_dir(STATE_DIR)
+
+
+def _open_locked(lock_kind):
+    return open_locked(STATE_FILE, lock_kind)
+
+
+def _entries(data, session_id):
+    """This session's {key: ts} map, or {} when the file holds anything
+    else there (valid JSON of the wrong shape must not raise)."""
+    entries = data.get(session_id or "")
+    return entries if isinstance(entries, dict) else {}
 
 
 def _prune(data, now):
@@ -105,19 +130,16 @@ def was_recently_denied(session_id, key, window_s):
     except Exception:
         return False
     try:
-        data = _load(fd)
+        data = load(fd)
     finally:
-        platform_compat.unlock_file(fd)
-        try:
-            os.close(fd)
-        except Exception:
-            pass
+        close(fd)
 
     try:
-        ts = (data.get(session_id or "") or {}).get(_key_str(key))
+        ts = _entries(data, session_id).get(_key_str(key))
         if ts is None:
             return False
-        return (time.time() - ts) <= window_s
+        # A stamp from the future (clock stepped back) is not a recent deny.
+        return 0 <= (time.time() - ts) <= window_s
     except Exception:
         return False
 
@@ -130,16 +152,10 @@ def record_denial(session_id, key):
     except Exception:
         return
     try:
-        data = _load(fd)
-        now = time.time()
-        data = _prune(data, now)
-        data.setdefault(session_id or "", {})[_key_str(key)] = now
-        _save(fd, data)
+        data = _prune(load(fd), time.time())
+        data.setdefault(session_id or "", {})[_key_str(key)] = time.time()
+        save(fd, data)
     except Exception:
         return
     finally:
-        platform_compat.unlock_file(fd)
-        try:
-            os.close(fd)
-        except Exception:
-            pass
+        close(fd)

@@ -249,6 +249,13 @@ class TestDeduplication(unittest.TestCase):
         state = {"last_key": "nokey", "shown": {"nokey": now - sc.REPEAT_AFTER_S - 1}}
         self.assertTrue(sc.should_show(state, "nokey", sc.REPEAT_AFTER_S, now))
 
+    def test_a_timestamp_in_the_future_does_not_suppress(self):
+        """After the clock steps back, a 'shown' stamp ahead of now would
+        silence the warning until the clock caught up; it is shown instead."""
+        now = 1_000_000.0
+        state = {"last_key": "nokey", "shown": {"nokey": now + 3600}}
+        self.assertTrue(sc.should_show(state, "nokey", sc.REPEAT_AFTER_S, now))
+
     def test_a_CHANGED_problem_is_shown_immediately(self):
         now = 1_000_000.0
         state = {"last_key": "health:down:daemon ping failed",

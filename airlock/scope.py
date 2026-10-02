@@ -150,8 +150,10 @@ def shell_words(command):
 # `cat <<~EOF` as the literal delimiter `~EOF` (it has no strip-tabs `<<~`
 # form; that is zsh). Rejecting it left the body unstripped and its lines
 # read as commands (review finding, PR #1).
+# `(?<!<)` and `(?!<)` keep a here-string (`<<<word`) out: it feeds one word
+# and opens no body, so the lines after it are commands.
 _HEREDOC_RE = re.compile(
-    r"""<<(-?)[ \t]*(?!<)(?:'([^']*)'|"([^"]*)"|((?:\\.|[^\s;&|<>()'"])+))""")
+    r"""(?<!<)<<(-?)[ \t]*(?!<)(?:'([^']*)'|"([^"]*)"|((?:\\.|[^\s;&|<>()'"])+))""")
 
 
 def _heredoc_delimiters(line):

@@ -52,6 +52,14 @@ class TestClient(unittest.TestCase):
         self.assertEqual(result["answers"]["task_kind"]["choice"], "lookup")
         self.assertGreaterEqual(latency_ms, 0)
 
+    def test_non_object_json_is_a_typesafe_error(self):
+        """Valid JSON that is not an object (null, a list) is as unusable as
+        bad JSON; callers would otherwise hit AttributeError on .get()."""
+        for payload in (None, [1, 2], "x"):
+            with mock.patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
+                with self.assertRaises(client.TypeSafeError):
+                    client.call_jev("fake-key", {"x": 1}, {"q": {}}, timeout=5)
+
     def test_timeout_raises(self):
         with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
             with self.assertRaises(TimeoutError):
