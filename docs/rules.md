@@ -15,6 +15,7 @@ request, no log row, no subprocess.
 | `R5-sudo` | Bash | deny | code only | `sudo` outside a named package install, or anywhere under `$HOME` |
 | `R6-gui-or-browser` | Bash | **`off` by default on every platform** | code only | opening a GUI or browser on a headless box |
 | `R7-destructive` | Bash | warn | code only | force pushes, hard resets, wholesale deletion (`rm -rf` of `/`, `~` or `.`, recursive `rm` behind `find -exec` or `xargs`), SQL `DROP`, `redis-cli FLUSHALL`, `terraform destroy`, `dd` onto a device, recursive `chmod`/`chown` of `/` or `~`, a download piped into a shell |
+| `R7-root-delete` | Bash | deny | code only | `rm -r` of `/`, `/*`, `~`, `~/*` or `$HOME`, behind any wrapper, past `sudo` and its options, and inside `sh -c` |
 | `R8-tier-guard` | Agent | deny two rungs over, **warn one rung over**, rewrite only if asked | Jev | a task dispatched to an agent more expensive than it needs |
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |

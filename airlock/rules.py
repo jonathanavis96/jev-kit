@@ -1387,6 +1387,141 @@ def prefilter_destructive(ctx):
     return None
 
 
+# --- R7-root-delete: the one destructive shape that is denied ------------------
+#
+# Self-contained on purpose: its own unwrapping, so the rule reads the same on
+# any release and does not move when the shared shell helpers do.
+
+R7_ROOT_SUGGESTION = (
+    "A recursive delete of / or of the home directory is never a step in a task. "
+    "Name the exact directory you mean, or ask the human."
+)
+
+_RD_SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+_RD_PLAIN_WRAPPERS = {"nice", "time", "command", "exec", "builtin", "stdbuf", "nohup", "ionice", "doas"}
+# Options that take the NEXT word as their value, per wrapper.
+_RD_VALUE_OPTS = {
+    "env": {"-u", "--unset", "-C", "--chdir"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "nice": {"-n", "--adjustment"},
+    "ionice": {"-c", "--class", "-n", "--classdata", "-p", "--pid"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "doas": {"-u", "-C"},
+    "sudo": {"-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from", "-D",
+             "--chdir", "-h", "--host", "-r", "--role", "-t", "--type", "-T", "--command-timeout",
+             "-U", "--other-user", "-R", "--chroot"},
+}
+_RD_SUDO_SHORT_VALUE = set("ugpCDhrtTUR")
+_RD_SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+
+def _rd_command(toks, depth=0):
+    """(program, args) behind assignments, wrappers and sudo, or the inner
+    script's tokens for `sh -c`. Returns (None, []) when nothing runs."""
+    while toks:
+        t = toks[0].lstrip("({!")
+        if not t:
+            toks = toks[1:]
+            continue
+        if _ASSIGN_RE.match(t):
+            toks = toks[1:]
+            continue
+        base = t.rsplit("/", 1)[-1]
+        if base in ("env", "timeout", "sudo") or base in _RD_PLAIN_WRAPPERS:
+            rest = toks[1:]
+            value_opts = _RD_VALUE_OPTS.get(base, set())
+            while rest and rest[0].startswith("-") and rest[0] != "-":
+                opt, rest = rest[0], rest[1:]
+                if opt == "--":
+                    break
+                if "=" in opt:
+                    continue
+                if opt in value_opts:
+                    rest = rest[1:]
+                    continue
+                if base == "sudo" and not opt.startswith("--"):
+                    # a short cluster: `-iu root` takes the next word
+                    for j, ch in enumerate(opt[1:], 1):
+                        if ch in _RD_SUDO_SHORT_VALUE:
+                            if j == len(opt) - 1:
+                                rest = rest[1:]
+                            break
+                if base == "nice" and opt[1:].lstrip("-").isdigit():
+                    continue  # `nice -10 cmd`
+            if base == "env":
+                if rest and rest[0] == "-":
+                    rest = rest[1:]
+                while rest and _ASSIGN_RE.match(rest[0]):
+                    rest = rest[1:]
+            if base == "timeout" and rest:
+                rest = rest[1:]  # the duration
+            if not rest:
+                return None, []
+            toks = rest
+            continue
+        return base, toks[1:]
+    return None, []
+
+
+def _rd_root_or_home(a):
+    """True for an rm target that is the filesystem root or the home
+    directory itself, or every child of either (`/*`, `~/*`)."""
+    if a.endswith(")") and "(" not in a:
+        a = a.rstrip(")")  # `(cd x && rm -rf /)`: the subshell's closing paren
+    if a.endswith(";"):
+        a = a.rstrip(";")  # `{ rm -rf /; }`
+    if not a:
+        return False
+    if a.strip("/") == "" or a in ("/*", "~", "~/", "~/*", "$HOME", "${HOME}", "$HOME/*", "${HOME}/*"):
+        return True
+    p = _expand(a)
+    if p.endswith("/*"):
+        p = p[:-2]
+    return p.rstrip("/") in ("", HOME)
+
+
+def _rd_hit(seg, depth=0):
+    prog, args = _rd_command(words(seg))
+    if prog in _RD_SHELLS and depth < 2 and "-c" in args:
+        i = args.index("-c")
+        script = " ".join(args[i + 1:]).strip("'\"")
+        for inner in split_segments(script):
+            hit = _rd_hit(inner, depth + 1)
+            if hit:
+                return hit
+        return None
+    if prog != "rm":
+        return None
+    if not any(a == "--recursive" or a.startswith("-") and not a.startswith("--") and "r" in a.lower()
+               for a in args):
+        return None
+    for a in args:
+        if not a.startswith("-") and _rd_root_or_home(a):
+            return a
+    return None
+
+
+def prefilter_root_delete(ctx):
+    """`rm -r` of `/`, `/*`, `~`, `~/*` or `$HOME`, behind any wrapper, past
+    sudo and its options, inside `sh -c`, `$(...)` or backticks. R7-destructive
+    only warns; this shape alone is denied (Jonathan, 2026-10-02). A bare `*`,
+    `.` or a named subdirectory stays R7-destructive's warning."""
+    if ctx["tool_name"] not in SHELL_TOOLS:
+        return None
+    segs = list(ctx["segments"])
+    try:
+        for m in _RD_SUBST_RE.finditer(strip_heredocs(ctx.get("command") or "")):
+            segs.extend(split_segments(m.group(1) if m.group(1) is not None else m.group(2)))
+    except Exception:
+        pass
+    for seg in segs:
+        hit = _rd_hit(seg)
+        if hit:
+            return Match("`rm -r %s` would delete the whole filesystem or home directory" % hit,
+                         R7_ROOT_SUGGESTION)
+    return None
+
+
 # --- R9: committing a secret -------------------------------------------------
 
 R9_SUGGESTION = (
@@ -2090,6 +2225,13 @@ RULES = [
         action="warn",
         prefilter=prefilter_destructive,
         why="CLAUDE.md: ask first for anything hard to reverse or outward-facing.",
+    ),
+    Rule(
+        id="R7-root-delete",
+        tools=SHELL_TOOLS,
+        action="deny",
+        prefilter=prefilter_root_delete,
+        why="A recursive delete of / or the home directory is never part of a task.",
     ),
     Rule(
         id="R8-tier-guard",
