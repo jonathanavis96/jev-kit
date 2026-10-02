@@ -182,7 +182,7 @@ class TestFailOpen(EnforceTestBase):
         buf = self._stdout()
         with mock.patch("airlock.keyfile.get_api_key", return_value="key"), \
              mock.patch("airlock.client.ask", return_value=bad):
-            denied = enforce.handle(_bash_data("cat secrets.txt; rm -rf ~"), "Bash")
+            denied = enforce.handle(_bash_data("cat secrets.txt; rm -rf *"), "Bash")
         self.assertFalse(denied)
         self.assertIn("R7-destructive", buf.getvalue())
         rows = {e.get("rule_id"): e for e in self._logged}
