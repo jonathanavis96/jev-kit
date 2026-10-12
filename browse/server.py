@@ -1033,18 +1033,26 @@ class Browse:
         deadline = started + call_timeout_s(params["plan"])
         clone = resolve_clone()
         key = resolve_key()
-        try:
-            # One transaction under the lock, from the browser's URL to the
-            # agent's answer, so nothing replaces the browser in between.
-            with self.lock:
+        # One transaction under the lock, from the browser's URL to the agent's
+        # answer and the reading of any failure, so nothing replaces the
+        # browser before it has been looked at.
+        with self.lock:
+            try:
                 result = self._call(params, deadline, clone, key)
-        except BrowseTimeout:
-            # The killed agent leaves its tab behind. A browser we own is
-            # cheaper to restart than to clean; one we do not own is left be.
-            self.chromium.close()
-            raise
-        except BrowseError as exc:
-            raise BrowseError(scrub(self._explain(exc), secrets_of(key)))
+            except BrowseTimeout as exc:
+                # A browser that died under the call is recorded first, so its
+                # binary is set aside. Then the usual cleanup: the killed agent
+                # leaves its tab behind, and a browser we own is cheaper to
+                # restart than to clean; one we do not own is left be.
+                binary = self.chromium.binary
+                reason = self.chromium.close_if_exited()
+                self.chromium.close()
+                if reason is None:
+                    raise
+                raise BrowseTimeout(scrub("%s Chromium (%s) had exited under it: %s."
+                                          % (exc, binary, reason), secrets_of(key)))
+            except BrowseError as exc:
+                raise BrowseError(scrub(self._explain(exc), secrets_of(key)))
         text, truncated = trim_text(result.get("text"))
         out = {
             "final_url": result.get("final_url"),

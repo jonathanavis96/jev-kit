@@ -617,6 +617,35 @@ class TestErrorPaths(CallCase):
             self.browse.prewarm()
         self.assertEqual(seen, [False, False])
 
+    def test_a_timeout_records_a_browser_that_died_under_it(self):
+        """Codex on PR #38: the timeout cleanup closed a dead browser without
+        reading it, so its binary was never set aside."""
+        self.browse.chromium.close_if_exited.return_value = "GPU process isn't usable. Goodbye"
+        self.browse.chromium.binary = "/opt/chromium-815036/chrome"
+        with mock.patch.object(self.browse, "ask",
+                               side_effect=server.BrowseTimeout("timed out after 90 s")):
+            result = call(self.srv, goal="open https://example.com")
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("timed out", text)
+        self.assertIn("GPU process isn't usable", text)
+        self.browse.chromium.close_if_exited.assert_called_once_with()
+        self.browse.chromium.close.assert_called_once_with()
+
+    def test_a_failure_is_read_before_the_lock_is_let_go(self):
+        """Codex on PR #38: a waiting prewarm could take the lock and replace
+        a dead browser before the call had read why it died."""
+        seen = []
+
+        def close_if_exited():
+            seen.append(self.lock_is_free_elsewhere())
+            return None
+        self.browse.chromium.close_if_exited.side_effect = close_if_exited
+        for error in (server.BrowseError("no close frame"), server.BrowseTimeout("timed out")):
+            with mock.patch.object(self.browse, "ask", side_effect=error):
+                call(self.srv, goal="open https://example.com")
+        self.assertEqual(seen, [False, False])
+
     def test_a_call_passes_its_deadline_to_the_browser_start(self):
         with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
             started = time.monotonic()
