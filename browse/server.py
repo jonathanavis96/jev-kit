@@ -1035,8 +1035,13 @@ class Browse:
         key = resolve_key()
         # One transaction under the lock, from the browser's URL to the agent's
         # answer and the reading of any failure, so nothing replaces the
-        # browser before it has been looked at.
-        with self.lock:
+        # browser before it has been looked at. A prewarm can hold the lock for
+        # a while: the call waits for it no longer than its own time, and then
+        # leaves the browser the prewarm is using alone.
+        if not self.lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+            raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) waiting for the "
+                                "prewarm to finish." % call_timeout_s(params["plan"]))
+        try:
             try:
                 result = self._call(params, deadline, clone, key)
             except BrowseTimeout as exc:
@@ -1053,6 +1058,8 @@ class Browse:
                                           % (exc, binary, reason), secrets_of(key)))
             except BrowseError as exc:
                 raise BrowseError(scrub(self._explain(exc), secrets_of(key)))
+        finally:
+            self.lock.release()
         text, truncated = trim_text(result.get("text"))
         out = {
             "final_url": result.get("final_url"),

@@ -646,6 +646,31 @@ class TestErrorPaths(CallCase):
                 call(self.srv, goal="open https://example.com")
         self.assertEqual(seen, [False, False])
 
+    def test_a_call_waits_for_a_prewarm_no_longer_than_its_own_time(self):
+        """Codex on PR #38: a stalled prewarm held the lock, and a call waited
+        for it well past JEV_BROWSE_TIMEOUT."""
+        threading = __import__("threading")
+        held, done = threading.Event(), threading.Event()
+
+        def prewarm():
+            with self.browse.lock:
+                held.set()
+                done.wait(10)
+        t = threading.Thread(target=prewarm)
+        t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(done.set)
+        held.wait(5)
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"JEV_BROWSE_TIMEOUT": "1"}), \
+             mock.patch.object(self.browse, "ask") as run:
+            result = call(self.srv, goal="open https://example.com")
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertTrue(result["isError"])
+        self.assertIn("prewarm", result["content"][0]["text"])
+        run.assert_not_called()
+        self.browse.chromium.close.assert_not_called()
+
     def test_a_call_passes_its_deadline_to_the_browser_start(self):
         with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
             started = time.monotonic()
