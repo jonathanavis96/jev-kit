@@ -273,6 +273,7 @@ class CallCase(unittest.TestCase):
         self.browse = server.Browse()
         self.browse.chromium = mock.Mock()
         self.browse.chromium.ensure.return_value = "http://127.0.0.1:45678"
+        self.browse.chromium.close_if_exited.return_value = None
         self.srv = server.Server(self.browse)
 
     RESULT = {"status": "done", "steps": 2, "final_url": "https://example.com/",
@@ -549,6 +550,139 @@ class TestErrorPaths(CallCase):
         self.assertTrue(result["isError"])
         run.assert_not_called()
 
+    def test_a_chromium_that_exits_mid_call_is_named_and_never_replayed(self):
+        """2026-10-12: the browser aborted two seconds in, and all the agent
+        could say was its CDP socket closing under it. The goal is not run
+        again: it may already have submitted a form."""
+        self.browse.chromium.close_if_exited.return_value = "GPU process isn't usable. Goodbye"
+        self.browse.chromium.binary = "/opt/chromium-815036/chrome"
+        with mock.patch.object(self.browse, "ask", side_effect=server.BrowseError(
+                "RuntimeError: no close frame received or sent")) as run:
+            result = call(self.srv, goal="open https://example.com")
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("/opt/chromium-815036/chrome", text)
+        self.assertIn("GPU process isn't usable", text)
+        self.assertIn("no close frame", text)
+        self.assertIn("not replayed", text)
+        self.assertIn("JEV_BROWSE_CHROMIUM", text)
+        self.assertEqual(run.call_count, 1)
+        self.browse.chromium.close_if_exited.assert_called_once_with()
+
+    def test_an_agent_error_with_the_browser_still_up_is_passed_through(self):
+        with mock.patch.object(self.browse, "ask",
+                               side_effect=server.BrowseError("KeyError: x")) as run:
+            result = call(self.srv, goal="open https://example.com")
+        self.assertTrue(result["isError"])
+        self.assertEqual(result["content"][0]["text"], "browse failed: KeyError: x")
+        self.assertEqual(run.call_count, 1)
+        self.browse.chromium.close.assert_not_called()
+
+    def test_a_chromium_that_dies_under_the_prewarm_is_set_aside_and_warmed_again(self):
+        """Codex on PR #38. A warm-up has no side effects, so unlike a goal it
+        is safe to run once more on the fresh browser."""
+        self.browse.chromium.close_if_exited.side_effect = ["GPU process isn't usable. Goodbye", None]
+        with mock.patch.object(self.browse, "ask", side_effect=[
+                server.BrowseError("RuntimeError: no close frame received or sent"),
+                {"warmed": ["harness"]}]) as run:
+            self.browse.prewarm()
+        self.assertEqual([c.args[0] for c in run.call_args_list], [{"op": "warm"}] * 2)
+        self.assertEqual(self.browse.chromium.ensure.call_count, 2)
+
+    def lock_is_free_elsewhere(self):
+        """Whether another thread could take the server's lock right now."""
+        took = []
+
+        def probe():
+            if self.browse.lock.acquire(timeout=0.2):
+                took.append(True)
+                self.browse.lock.release()
+        t = __import__("threading").Thread(target=probe)
+        t.start()
+        t.join()
+        return bool(took)
+
+    def test_a_call_and_a_prewarm_each_hold_the_lock_from_browser_to_answer(self):
+        """Codex on PR #38: a prewarm could replace the browser between a call
+        taking its URL and the call reaching the worker."""
+        seen = []
+        real_child_env = self.browse.child_env
+
+        def child_env(*args):
+            seen.append(self.lock_is_free_elsewhere())
+            return real_child_env(*args)
+        with mock.patch.object(self.browse, "child_env", side_effect=child_env), \
+             mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
+            call(self.srv, goal="open https://example.com")
+            self.browse.prewarm()
+        self.assertEqual(seen, [False, False])
+
+    def test_a_timeout_records_a_browser_that_died_under_it(self):
+        """Codex on PR #38: the timeout cleanup closed a dead browser without
+        reading it, so its binary was never set aside."""
+        self.browse.chromium.close_if_exited.return_value = "GPU process isn't usable. Goodbye"
+        self.browse.chromium.binary = "/opt/chromium-815036/chrome"
+        with mock.patch.object(self.browse, "ask",
+                               side_effect=server.BrowseTimeout("timed out after 90 s")):
+            result = call(self.srv, goal="open https://example.com")
+        self.assertTrue(result["isError"])
+        text = result["content"][0]["text"]
+        self.assertIn("timed out", text)
+        self.assertIn("GPU process isn't usable", text)
+        self.browse.chromium.close_if_exited.assert_called_once_with()
+        self.browse.chromium.close.assert_called_once_with()
+
+    def test_a_failure_is_read_before_the_lock_is_let_go(self):
+        """Codex on PR #38: a waiting prewarm could take the lock and replace
+        a dead browser before the call had read why it died."""
+        seen = []
+
+        def close_if_exited():
+            seen.append(self.lock_is_free_elsewhere())
+            return None
+        self.browse.chromium.close_if_exited.side_effect = close_if_exited
+        for error in (server.BrowseError("no close frame"), server.BrowseTimeout("timed out")):
+            with mock.patch.object(self.browse, "ask", side_effect=error):
+                call(self.srv, goal="open https://example.com")
+        self.assertEqual(seen, [False, False])
+
+    def test_a_call_waits_for_a_prewarm_no_longer_than_its_own_time(self):
+        """Codex on PR #38: a stalled prewarm held the lock, and a call waited
+        for it well past JEV_BROWSE_TIMEOUT."""
+        threading = __import__("threading")
+        held, done = threading.Event(), threading.Event()
+
+        def prewarm():
+            with self.browse.lock:
+                held.set()
+                done.wait(10)
+        t = threading.Thread(target=prewarm)
+        t.start()
+        self.addCleanup(t.join)
+        self.addCleanup(done.set)
+        held.wait(5)
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"JEV_BROWSE_TIMEOUT": "1"}), \
+             mock.patch.object(self.browse, "ask") as run:
+            result = call(self.srv, goal="open https://example.com")
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertTrue(result["isError"])
+        self.assertIn("prewarm", result["content"][0]["text"])
+        run.assert_not_called()
+        self.browse.chromium.close.assert_not_called()
+
+    def test_a_call_passes_its_deadline_to_the_browser_start(self):
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
+            started = time.monotonic()
+            call(self.srv, goal="open https://example.com")
+        deadline = self.browse.chromium.ensure.call_args.kwargs["deadline"]
+        self.assertAlmostEqual(deadline - started, server.DEFAULT_TIMEOUT_S, delta=5)
+
+    def test_a_prewarm_with_the_browser_still_up_is_not_repeated(self):
+        with mock.patch.object(self.browse, "ask", return_value={"warmed": ["harness"]}) as run:
+            self.browse.prewarm()
+        self.assertEqual(run.call_count, 1)
+
     def test_a_bad_argument_is_an_error_result_not_a_crash(self):
         result = call(self.srv, goal="no url in here")
         self.assertTrue(result["isError"])
@@ -782,6 +916,23 @@ class TestChromium(unittest.TestCase):
         self.assertIsNone(c.profile)
         self.assertFalse(os.path.exists(stale))
 
+    def test_a_chromium_that_died_between_calls_is_set_aside(self):
+        """Codex on PR #38: a browser that died after a prewarm, or between
+        calls, was closed without a note, and the same build started again."""
+        c = server.Chromium()
+        c.binary = "/pw/chromium-815036/chrome-linux/chrome"
+        c.proc = mock.Mock(**{"poll.return_value": 1, "returncode": 1, "pid": 4242})
+        c.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
+        c.url = "http://127.0.0.1:1"
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums", return_value=[]), \
+             mock.patch.object(server, "find_chromium", return_value=None) as find:
+            os.environ.pop("BU_CDP_URL", None)
+            with self.assertRaises(server.BrowseError):
+                c.ensure()
+        find.assert_called_once_with(skip={"/pw/chromium-815036/chrome-linux/chrome"})
+
     def test_no_binary_is_a_message(self):
         c = server.Chromium()
         with mock.patch.object(server, "cdp_answers", return_value=False), \
@@ -801,6 +952,225 @@ class TestChromium(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}):
             os.environ.pop("JEV_BROWSE_CHROMIUM", None)
             self.assertIn("chromium-1246", server.find_chromium())
+
+    def test_a_legacy_playwright_revision_never_outranks_a_current_one(self):
+        """chromium-815036 is Chromium 88, named under Playwright's pre-1.10
+        scheme. It outranked chromium-1243 (Chrome 153) as a plain number, and
+        on WSL2 it aborts on its own two seconds after starting."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        for rev, sub in (("815036", "chrome-linux"), ("1217", "chrome-linux64"),
+                         ("1243", "chrome-linux64")):
+            d = Path(tmp) / ("chromium-" + rev) / sub
+            d.mkdir(parents=True)
+            (d / "chrome").write_text("")
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            self.assertIn("chromium-1243", server.find_chromium())
+        (Path(tmp) / "chromium-1217").rename(Path(tmp) / "gone")
+        (Path(tmp) / "chromium-1243").rename(Path(tmp) / "gone2")
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}), \
+             mock.patch.object(server.shutil, "which", return_value=None):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            # Still found when it is the only one there.
+            self.assertIn("chromium-815036", server.find_chromium())
+
+    def gone_chromium(self, log_text="", **proc):
+        c = server.Chromium()
+        c.binary = "/pw/chromium-815036/chrome-linux/chrome"
+        c.url = "http://127.0.0.1:1"
+        c.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
+        self.addCleanup(__import__("shutil").rmtree, c.profile, True)
+        Path(c.profile, "chromium-stderr.log").write_text(log_text)
+        c.proc = mock.Mock(**proc)
+        return c
+
+    GPU_LOG = (
+        "DevTools listening on ws://127.0.0.1:1/devtools/browser/x\n"
+        "[1012/192049.313805:WARNING:gpu_process_host.cc(1262)] The GPU process has crashed 9 time(s)\n"
+        "[1012/192049.313844:FATAL:gpu_data_manager_impl_private.cc(445)] GPU process isn't usable. Goodbye.\n"
+        "#0 0x5854996a02f9 base::debug::CollectStackTrace()\n")
+
+    def test_an_exited_chromium_is_closed_and_its_binary_set_aside(self):
+        c = self.gone_chromium(self.GPU_LOG, **{"poll.return_value": 1, "returncode": 1})
+        profile = c.profile
+        self.assertEqual(c.close_if_exited(), "GPU process isn't usable. Goodbye")
+        self.assertEqual(c.failed, {"/pw/chromium-815036/chrome-linux/chrome"})
+        self.assertIsNone(c.proc)
+        self.assertFalse(os.path.exists(profile))
+        c = self.gone_chromium(**{"poll.return_value": 1, "returncode": 1})
+        self.assertEqual(c.close_if_exited(), "exit status 1", "no FATAL line")
+        self.assertIsNone(server.Chromium().close_if_exited(), "nothing was started")
+
+    def test_the_fatal_line_is_read_from_the_end_of_a_long_log(self):
+        """Codex on PR #38: a browser reused for hours logs more than the
+        window read, and the FATAL that matters is the last one written."""
+        log_text = ("[1012/080000.000001:FATAL:old.cc(1)] An old, survived complaint.\n"
+                    + "[1012/090000.000001:WARNING:noise.cc(1)] padding\n" * 8000
+                    + self.GPU_LOG)
+        self.assertGreater(len(log_text), server.CRASH_LOG_TAIL_BYTES)
+        c = self.gone_chromium(log_text, **{"poll.return_value": 1, "returncode": 1})
+        self.assertEqual(c.close_if_exited(), "GPU process isn't usable. Goodbye")
+
+    def test_a_running_chromium_that_answers_is_left_alone(self):
+        c = self.gone_chromium(**{"poll.return_value": None})
+        with mock.patch.object(server, "cdp_answers", return_value=True):
+            self.assertIsNone(c.close_if_exited())
+        self.assertEqual(c.failed, set())
+        self.assertTrue(os.path.exists(c.profile))
+        c.proc.wait.assert_not_called()
+
+    def test_a_chromium_still_shutting_down_is_waited_for(self):
+        """Codex on PR #38: the CDP socket can close a moment before poll()
+        sees the exit, and that window must not read as a healthy browser."""
+        c = self.gone_chromium(self.GPU_LOG, **{"poll.side_effect": [None, 1, 1, 1],
+                                                "returncode": 1})
+        with mock.patch.object(server, "cdp_answers", return_value=False):
+            self.assertEqual(c.close_if_exited(), "GPU process isn't usable. Goodbye")
+        self.assertEqual(c.failed, {"/pw/chromium-815036/chrome-linux/chrome"})
+
+    def test_a_chromium_that_stops_answering_but_never_exits_is_closed(self):
+        c = self.gone_chromium(**{"poll.return_value": None, "pid": 4242,
+                                  "wait.side_effect": subprocess.TimeoutExpired("chrome", 3)})
+        with mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server.os, "killpg"):
+            self.assertEqual(c.close_if_exited(), "it stopped answering on its CDP port")
+        self.assertIsNone(c.proc)
+        self.assertIn("/pw/chromium-815036/chrome-linux/chrome", c.failed)
+
+    def test_a_legacy_build_loses_across_roots_and_to_path(self):
+        """Codex on PR #38: ranking one root at a time let a legacy build in
+        PLAYWRIGHT_BROWSERS_PATH win over a current one in the default cache."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        legacy = tmp / "pw" / "chromium-815036" / "chrome-linux" / "chrome"
+        current = tmp / "home" / ".cache" / "ms-playwright" / "chromium-1243" / "chrome-linux64" / "chrome"
+        for binary in (legacy, current):
+            binary.parent.mkdir(parents=True)
+            binary.write_text("")
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", return_value="/usr/bin/chromium"):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            self.assertEqual(server.find_chromium(), str(current))
+            current.unlink()
+            self.assertEqual(server.find_chromium(), "/usr/bin/chromium")
+            self.assertEqual(server.find_chromium(skip={"/usr/bin/chromium"}), str(legacy))
+
+    @unittest.skipIf(os.name == "nt", "symlinks")
+    def test_a_failed_binary_is_skipped_under_every_name(self):
+        """Codex on PR #38: google-chrome linked to google-chrome-stable is one
+        binary, and skipping one name must not start it again under the other."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        real = tmp / "opt" / "chrome"
+        real.parent.mkdir()
+        real.write_text("")
+        (tmp / "google-chrome").symlink_to(real)
+        (tmp / "google-chrome-stable").symlink_to(real)
+        legacy = tmp / "pw" / "chromium-815036" / "chrome-linux" / "chrome"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("")
+        names = {"google-chrome": str(tmp / "google-chrome"),
+                 "google-chrome-stable": str(tmp / "google-chrome-stable")}
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", side_effect=names.get):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            self.assertEqual(server.find_chromium(), names["google-chrome"])
+            self.assertEqual(server.find_chromium(skip={names["google-chrome"]}), str(legacy))
+
+    def test_a_binary_that_failed_is_passed_over_while_another_is_installed(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        paths = {}
+        for rev in ("1243", "1234"):
+            d = Path(tmp) / ("chromium-" + rev) / "chrome-linux64"
+            d.mkdir(parents=True)
+            (d / "chrome").write_text("")
+            paths[rev] = str(d / "chrome")
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}), \
+             mock.patch.object(server.shutil, "which", return_value=None):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            self.assertEqual(server.find_chromium(skip={paths["1243"]}), paths["1234"])
+            # Every one failed: the newest is still better than none.
+            self.assertEqual(server.find_chromium(skip=set(paths.values())), paths["1243"])
+            os.environ["JEV_BROWSE_CHROMIUM"] = paths["1243"]
+            self.assertEqual(server.find_chromium(skip={paths["1243"]}), paths["1243"],
+                             "a person chose it")
+
+    def two_builds(self, newer, older):
+        """A Playwright cache holding two shell stand-ins, newest first."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        out = []
+        for rev, script in (("1243", newer), ("1234", older)):
+            binary = tmp / "pw" / ("chromium-" + rev) / "chrome-linux64" / "chrome"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\necho started >> %s/%s.ran\n%s" % (tmp, rev, script))
+            binary.chmod(0o755)
+            out.append(str(binary))
+        return tmp, out
+
+    def start_from(self, tmp, answers):
+        c = server.Chromium()
+        self.addCleanup(c.close)
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", return_value=None), \
+             mock.patch.object(server, "cdp_answers", side_effect=answers), \
+             mock.patch.object(server, "running_chromiums", return_value=[]):
+            for var in ("JEV_BROWSE_CHROMIUM", "BU_CDP_URL", "JEV_BROWSE_NO_SANDBOX"):
+                os.environ.pop(var, None)
+            return c, c.ensure()
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_a_binary_that_dies_at_startup_is_set_aside_and_the_next_one_started(self):
+        """Codex on PR #38: a build that exits before opening its CDP port was
+        closed without a note, so every call started the same one again."""
+        tmp, (newer, older) = self.two_builds("exit 1\n", "exec sleep 30\n")
+        c, url = self.start_from(tmp, lambda *a, **k: (tmp / "1234.ran").exists())
+        self.assertTrue(url.startswith("http://127.0.0.1:"))
+        self.assertEqual(c.binary, older)
+        self.assertEqual(c.failed, {newer})
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_when_every_binary_dies_at_startup_the_last_failure_is_raised(self):
+        tmp, (newer, older) = self.two_builds("exit 1\n", "exit 1\n")
+        with self.assertRaises(server.BrowseError) as caught:
+            self.start_from(tmp, lambda *a, **k: False)
+        self.assertIn("chromium-1234", str(caught.exception))
+        self.assertTrue((tmp / "1243.ran").exists() and (tmp / "1234.ran").exists())
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_starting_stops_at_the_call_deadline(self):
+        """Codex on PR #38: builds that stay up without opening CDP each took
+        the full start timeout, one after another, past the call's own."""
+        tmp, _ = self.two_builds("exec sleep 30\n", "exec sleep 30\n")
+        c = server.Chromium()
+        self.addCleanup(c.close)
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", return_value=None), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums", return_value=[]):
+            for var in ("JEV_BROWSE_CHROMIUM", "BU_CDP_URL", "JEV_BROWSE_NO_SANDBOX"):
+                os.environ.pop(var, None)
+            with self.assertRaises(server.BrowseTimeout):
+                c.ensure(deadline=started + 1.0)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual(c.failed, set(), "running out of time is not the binary's fault")
+        self.assertFalse((tmp / "1234.ran").exists())
+        self.assertFalse(c.owned())
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_a_sandbox_refusal_is_not_tried_on_another_binary(self):
+        refuse = 'echo "FATAL: No usable sandbox!" >&2\nexit 134\n'
+        tmp, _ = self.two_builds(refuse, refuse)
+        with self.assertRaises(server.SandboxRefused):
+            self.start_from(tmp, lambda *a, **k: False)
+        self.assertFalse((tmp / "1234.ran").exists())
 
     @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
     def test_a_sandbox_refusal_says_so_and_never_falls_back(self):

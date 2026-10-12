@@ -37,6 +37,11 @@ This process owns the Chromium lifecycle, and only its own:
     serves, and closed when the process exits. If it has died since, a fresh
     one is started and the dead one's profile directory is removed, so
     neither browsers nor profiles pile up.
+  * If it exits in the middle of a call, the call fails with the browser's
+    own last FATAL line, and is not replayed: whether the goal's actions took
+    effect is unknown. The next call starts a fresh one, from the next-newest
+    binary when there is one, because a build that aborted once on this box
+    tends to abort again.
   * Other Chromiums on the box are ignored. A Playwright MCP browser, another
     Claude session's own `browse` server, an ordinary desktop Chrome: this
     process never attaches to one, never kills one, and never refuses to work
@@ -124,6 +129,11 @@ PLAN_TIMEOUT_S = 180.0
 # returns the page it reached instead of being killed with nothing.
 PLAN_MARGIN_S = 8.0
 CHROMIUM_START_S = 15.0
+# How long a Chromium whose CDP port has gone quiet gets to finish exiting: the
+# socket can close a moment before the process is gone.
+CHROMIUM_EXIT_GRACE_S = 3.0
+# How much of the end of a dead Chromium's own log is searched for its FATAL line.
+CRASH_LOG_TAIL_BYTES = 256 * 1024
 TEXT_LIMIT_BYTES = 8 * 1024
 
 TOOL = {
@@ -203,6 +213,11 @@ class BrowseError(Exception):
 
 class BrowseTimeout(BrowseError):
     """The per-call time ran out and the agent was killed."""
+
+
+class SandboxRefused(BrowseError):
+    """Chromium would not start without a usable sandbox. Another binary would
+    refuse the same way, so nothing else is tried."""
 
 
 def log(message):
@@ -475,30 +490,61 @@ def cdp_answers(url, timeout_s=2.0):
         return False
 
 
+# Playwright before 1.10 named its directories after Chromium's own snapshot
+# revision (chromium-815036 is Chromium 88, from 2020). Every release since uses
+# Playwright's build number (chromium-1243 is Chrome 153). Compared as plain
+# numbers the 2020 build won. On a 6.18 kernel with glibc 2.39 its GPU process
+# is killed by its own seccomp sandbox nine times in two seconds and the browser
+# aborts, which is how every call failed with "no close frame received or sent"
+# from 2026-09-28 to 2026-10-12.
+LEGACY_REVISION = 100000
+
+
 def _revision(path):
+    """A sort key for a Playwright Chromium path: any current-scheme build
+    beats any legacy one, then the higher number wins."""
     m = re.search(r"chromium-(\d+)", path)
-    return int(m.group(1)) if m else 0
+    number = int(m.group(1)) if m else 0
+    return (number < LEGACY_REVISION, number)
 
 
-def find_chromium():
+def find_chromium(skip=()):
+    """The Chromium binary to start: JEV_BROWSE_CHROMIUM when set, otherwise the
+    newest Playwright build, then one on PATH.
+
+    A binary in `skip` is passed over while any other one is installed, and
+    used anyway when it is the only one. Paths are compared once resolved, so
+    `google-chrome` and the `google-chrome-stable` it links to count as one
+    binary. An explicit JEV_BROWSE_CHROMIUM is never passed over: a person
+    chose it."""
     explicit = os.environ.get("JEV_BROWSE_CHROMIUM")
     if explicit:
         return os.path.expanduser(explicit)
     roots = [os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
              str(Path.home() / ".cache" / "ms-playwright"),
              str(Path.home() / "Library" / "Caches" / "ms-playwright")]
+    found = []
     for root in filter(None, roots):
-        found = []
         for pattern in ("chromium-*/chrome-linux*/chrome",
                         "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium"):
             found.extend(glob.glob(os.path.join(os.path.expanduser(root), pattern)))
-        if found:
-            return max(found, key=_revision)
-    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
-        path = shutil.which(name)
-        if path:
+    # Ranked across every root at once. A legacy build comes last, behind even
+    # a Chromium on PATH, because nothing else is as likely not to start.
+    found.sort(key=_revision, reverse=True)
+    current = [path for path in found if _revision(path)[0]]
+    on_path = [shutil.which(name) for name in
+               ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")]
+    candidates, seen = [], set()
+    for path in current + [path for path in on_path if path] + found[len(current):]:
+        real = os.path.realpath(path)
+        if real not in seen:
+            seen.add(real)
+            candidates.append(path)
+    skipped = {os.path.realpath(path) for path in skip}
+    for path in candidates:
+        if os.path.realpath(path) not in skipped:
             return path
-    return None
+    return candidates[0] if candidates else None
 
 
 def free_port():
@@ -529,9 +575,53 @@ class Chromium:
         self.proc = None
         self.url = None
         self.profile = None
+        self.binary = None
+        # Binaries whose browser exited under a call. find_chromium() passes
+        # over them for the life of this process while another is installed.
+        self.failed = set()
 
     def owned(self):
         return self.proc is not None and self.proc.poll() is None
+
+    def close_if_exited(self):
+        """Why the Chromium this process started has gone, or None while it
+        still answers (or when none was started here).
+
+        A gone one is closed, which removes its profile directory, and its
+        binary is set aside for the next start. The reason is the last FATAL
+        line of its own log, read first because the log lives in that
+        profile."""
+        if self.proc is None:
+            return None
+        if self.proc.poll() is None:
+            if cdp_answers(self.url):
+                return None
+            try:
+                self.proc.wait(timeout=CHROMIUM_EXIT_GRACE_S)
+            except subprocess.TimeoutExpired:
+                pass
+        said = ""
+        if self.profile:
+            # The tail: a browser reused for hours can log far more than this,
+            # and the line that matters is the one written as it died.
+            try:
+                with open(os.path.join(self.profile, "chromium-stderr.log"), "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(f.tell() - CRASH_LOG_TAIL_BYTES, 0))
+                    said = f.read().decode("utf-8", errors="replace")
+            except OSError:
+                pass
+        fatal = [line for line in said.splitlines() if ":FATAL:" in line]
+        if self.proc.poll() is None:
+            reason = "it stopped answering on its CDP port"
+        elif fatal:
+            reason = fatal[-1].split("] ", 1)[-1].strip().rstrip(".")
+        else:
+            reason = "exit status %s" % self.proc.returncode
+        if self.binary:
+            self.failed.add(self.binary)
+        self.close()
+        return reason
 
     def _foreign(self):
         rows = []
@@ -546,18 +636,25 @@ class Chromium:
             rows.append((pid, cmd))
         return rows
 
-    def ensure(self):
+    def ensure(self, deadline=None):
         """The CDP URL to use, starting this server's own Chromium if needed.
 
         Never attaches to, and never kills, a browser this process did not
         start. The one exception is an explicitly set `BU_CDP_URL`, which is a
-        person naming a browser to share."""
+        person naming a browser to share. With `deadline` (a time.monotonic()
+        value), starting gives up with BrowseTimeout once it passes, however
+        many binaries are left to try."""
         if self.owned() and cdp_answers(self.url):
             return self.url
         if self.proc is not None:
-            # Ours, but gone or unreachable. close() reaps it and removes its
-            # profile directory, so a restart cannot leave either behind.
-            log("this server's Chromium is no longer answering; starting a fresh one")
+            # Ours, but gone or unreachable. close_if_exited() sets its binary
+            # aside whenever it died, between calls or after a prewarm as much
+            # as during a call, and close() reaps it and removes its profile
+            # directory, so a restart cannot leave either behind.
+            binary = self.binary
+            reason = self.close_if_exited()
+            log("this server's Chromium (%s) is no longer answering%s; starting a fresh one"
+                % (binary, ": %s" % reason if reason else ""))
         self.close()
         configured = os.environ.get("BU_CDP_URL")
         if configured and cdp_answers(configured):
@@ -569,12 +666,37 @@ class Chromium:
         if foreign:
             log("%d other Chromium process(es) on this box; starting our own anyway"
                 % len(foreign))
-        binary = find_chromium()
-        if not binary or not os.path.isfile(binary):
-            raise BrowseError(
-                "no Chromium binary found. Install one with `npx playwright install "
-                "chromium`, or set JEV_BROWSE_CHROMIUM to a Chromium or Chrome binary."
-            )
+        # Starting a browser has no side effects, so one that will not start is
+        # set aside and the next installed binary is tried in the same call.
+        tried, failure = set(), None
+        while True:
+            binary = find_chromium(skip=self.failed)
+            if not binary or not os.path.isfile(binary):
+                raise BrowseError(
+                    "no Chromium binary found. Install one with `npx playwright install "
+                    "chromium`, or set JEV_BROWSE_CHROMIUM to a Chromium or Chrome binary."
+                )
+            if os.path.realpath(binary) in tried:
+                raise failure
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BrowseTimeout("the call's time ran out (JEV_BROWSE_TIMEOUT) before a "
+                                    "Chromium would start. %s" % failure)
+            tried.add(os.path.realpath(binary))
+            try:
+                return self._start(binary, deadline)
+            except (SandboxRefused, BrowseTimeout):
+                raise
+            except BrowseError as exc:
+                self.failed.add(binary)
+                failure = exc
+                log("%s Trying the next installed Chromium, if there is one." % exc)
+
+    def _start(self, binary, deadline=None):
+        """Start `binary` headless on a free port and return its CDP URL.
+
+        It gets CHROMIUM_START_S to open the port, or what is left before
+        `deadline` when that is sooner. Running out of the call's time is a
+        BrowseTimeout, not a fault of the binary."""
         port = free_port()
         self.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
         command = [binary, "--headless=new", "--remote-debugging-port=%d" % port,
@@ -583,6 +705,7 @@ class Chromium:
         if os.environ.get("JEV_BROWSE_NO_SANDBOX") == "1":
             command.append("--no-sandbox")
         command.append("about:blank")
+        self.binary = binary
         stderr_path = os.path.join(self.profile, "chromium-stderr.log")
         try:
             with open(stderr_path, "wb") as stderr:
@@ -594,12 +717,18 @@ class Chromium:
             self.close()
             raise BrowseError("could not start Chromium (%s): %s" % (binary, exc))
         self.url = "http://127.0.0.1:%d" % port
-        deadline = time.monotonic() + CHROMIUM_START_S
-        while time.monotonic() < deadline and proc.poll() is None:
+        limit = time.monotonic() + CHROMIUM_START_S
+        cut_short = deadline is not None and deadline < limit
+        until = deadline if cut_short else limit
+        while time.monotonic() < until and proc.poll() is None:
             if cdp_answers(self.url, timeout_s=1.0):
                 log("started headless Chromium pid %d on %s" % (proc.pid, self.url))
                 return self.url
             time.sleep(0.1)
+        if cut_short and proc.poll() is None:
+            self.close()
+            raise BrowseTimeout("the call's time ran out (JEV_BROWSE_TIMEOUT) while Chromium "
+                                "(%s) was starting." % binary)
         try:
             with open(stderr_path, "r", errors="replace") as f:
                 said = f.read(64 * 1024)
@@ -607,7 +736,7 @@ class Chromium:
             said = ""
         self.close()
         if "No usable sandbox" in said:
-            raise BrowseError(
+            raise SandboxRefused(
                 "Chromium (%s) refused to start: no usable sandbox. On Ubuntu 23.10+ "
                 "AppArmor denies user namespaces to a binary with no profile. Give the "
                 "binary an AppArmor profile, or accept an unsandboxed browser by setting "
@@ -782,14 +911,14 @@ class Browse:
                 pass
         return text_model_env(env)
 
-    def ensure_chromium(self):
+    def ensure_chromium(self, deadline=None):
         """`Chromium.ensure()` under this server's lock.
 
         The background prewarm made this necessary: two threads in `ensure()`
         at once each started a browser, and only the second one was ever
         tracked or closed. One lock, one browser."""
         with self.lock:
-            return self.chromium.ensure()
+            return self.chromium.ensure(deadline=deadline)
 
     # --- the worker ----------------------------------------------------------
 
@@ -823,16 +952,80 @@ class Browse:
 
         Chromium, the worker process, the agent's imports, the harness daemon
         and the text model's own child. Never raises: a prewarm that fails
-        just leaves the first real call to do the work, exactly as before."""
+        just leaves the first real call to do the work, exactly as before.
+
+        The whole of it holds this server's lock, as a call does, so a call
+        never takes a browser's URL that a prewarm then replaces. A call
+        already waited for the prewarm's warm-up, so it costs no time."""
         try:
-            clone = resolve_clone()
-            key = resolve_key()
-            cdp_url = self.ensure_chromium()
-            self.daemon_used = True
-            result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
-            log("prewarmed: %s" % ", ".join(result.get("warmed") or ["nothing"]))
+            with self.lock:
+                self._prewarm()
         except Exception as exc:
             log("prewarm skipped: %s" % exc)
+
+    def _prewarm(self):
+        clone = resolve_clone()
+        key = resolve_key()
+        for attempt in (1, 2):
+            cdp_url = self.ensure_chromium(deadline=time.monotonic() + 60)
+            self.daemon_used = True
+            result, failure = None, None
+            try:
+                result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
+            except BrowseError as exc:
+                failure = exc
+            # A browser that died under the warm-up is set aside now, so the
+            # first real call does not start the same build again.
+            with self.lock:
+                binary = self.chromium.binary
+                reason = self.chromium.close_if_exited()
+            if reason is None or attempt == 2:
+                break
+            # Unlike a goal, a warm-up has no side effects to repeat.
+            log("this server's Chromium (%s) exited during the prewarm: %s" % (binary, reason))
+        if failure is not None:
+            raise failure
+        log("prewarmed: %s" % ", ".join(result.get("warmed") or ["nothing"]))
+
+    def _explain(self, exc):
+        """The agent's error, or what our own Chromium said as it died under
+        the call.
+
+        A browser that exits mid-call takes the agent's CDP socket with it,
+        and all the agent can say is "no close frame received or sent". The
+        call is not replayed: the agent may already have submitted a form or
+        posted a message, so a retry is the caller's decision."""
+        with self.lock:
+            binary = self.chromium.binary
+            reason = self.chromium.close_if_exited()
+        if reason is None:
+            return str(exc)
+        return ("Chromium (%s) exited during the call: %s. The agent said: %s. Whether the "
+                "goal's actions took effect is unknown, so it was not replayed. The next "
+                "call starts a fresh browser, from another installed build when there is "
+                "one. If it keeps happening, set JEV_BROWSE_CHROMIUM to a newer build or "
+                "run `npx playwright install chromium`." % (binary, reason, exc))
+
+    def _call(self, params, deadline, clone, key):
+        cdp_url = self.ensure_chromium(deadline=deadline)
+        request = dict(params, op="plan" if params["plan"] else "browse")
+        if params["screenshot"]:
+            directory = state_dir()
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.calls += 1
+            request["screenshot_path"] = str(directory / (
+                "browse-%s-%d-%d.png" % (time.strftime("%Y%m%d-%H%M%S"),
+                                         os.getpid(), self.calls)))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
+                                "the agent could start." % call_timeout_s(params["plan"]))
+        if params["plan"]:
+            request["budget_s"] = max(remaining - PLAN_MARGIN_S, 1.0)
+        # The daemon starts on the worker's first use, so a call that
+        # raises from here on still leaves one to stop.
+        self.daemon_used = True
+        return self.ask(request, self.child_env(key, cdp_url), clone, remaining)
 
     def call(self, args):
         started = time.monotonic()
@@ -840,33 +1033,33 @@ class Browse:
         deadline = started + call_timeout_s(params["plan"])
         clone = resolve_clone()
         key = resolve_key()
+        # One transaction under the lock, from the browser's URL to the agent's
+        # answer and the reading of any failure, so nothing replaces the
+        # browser before it has been looked at. A prewarm can hold the lock for
+        # a while: the call waits for it no longer than its own time, and then
+        # leaves the browser the prewarm is using alone.
+        if not self.lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+            raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) waiting for the "
+                                "prewarm to finish." % call_timeout_s(params["plan"]))
         try:
-            cdp_url = self.ensure_chromium()
-            request = dict(params, op="plan" if params["plan"] else "browse")
-            if params["screenshot"]:
-                directory = state_dir()
-                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                self.calls += 1
-                request["screenshot_path"] = str(directory / (
-                    "browse-%s-%d-%d.png" % (time.strftime("%Y%m%d-%H%M%S"),
-                                             os.getpid(), self.calls)))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
-                                    "the agent could start." % call_timeout_s(params["plan"]))
-            if params["plan"]:
-                request["budget_s"] = max(remaining - PLAN_MARGIN_S, 1.0)
-            # The daemon starts on the worker's first use, so a call that
-            # raises from here on still leaves one to stop.
-            self.daemon_used = True
-            result = self.ask(request, self.child_env(key, cdp_url), clone, remaining)
-        except BrowseTimeout:
-            # The killed agent leaves its tab behind. A browser we own is
-            # cheaper to restart than to clean; one we do not own is left be.
-            self.chromium.close()
-            raise
-        except BrowseError as exc:
-            raise BrowseError(scrub(str(exc), secrets_of(key)))
+            try:
+                result = self._call(params, deadline, clone, key)
+            except BrowseTimeout as exc:
+                # A browser that died under the call is recorded first, so its
+                # binary is set aside. Then the usual cleanup: the killed agent
+                # leaves its tab behind, and a browser we own is cheaper to
+                # restart than to clean; one we do not own is left be.
+                binary = self.chromium.binary
+                reason = self.chromium.close_if_exited()
+                self.chromium.close()
+                if reason is None:
+                    raise
+                raise BrowseTimeout(scrub("%s Chromium (%s) had exited under it: %s."
+                                          % (exc, binary, reason), secrets_of(key)))
+            except BrowseError as exc:
+                raise BrowseError(scrub(self._explain(exc), secrets_of(key)))
+        finally:
+            self.lock.release()
         text, truncated = trim_text(result.get("text"))
         out = {
             "final_url": result.get("final_url"),
