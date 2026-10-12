@@ -37,9 +37,11 @@ This process owns the Chromium lifecycle, and only its own:
     serves, and closed when the process exits. If it has died since, a fresh
     one is started and the dead one's profile directory is removed, so
     neither browsers nor profiles pile up.
-  * If it exits in the middle of a call, the call is tried once more on a
-    fresh one, started from the next-newest binary when there is one: a
-    build that aborted once on this box tends to abort again.
+  * If it exits in the middle of a call, the call fails with the browser's
+    own last FATAL line, and is not replayed: whether the goal's actions took
+    effect is unknown. The next call starts a fresh one, from the next-newest
+    binary when there is one, because a build that aborted once on this box
+    tends to abort again.
   * Other Chromiums on the box are ignored. A Playwright MCP browser, another
     Claude session's own `browse` server, an ordinary desktop Chrome: this
     process never attaches to one, never kills one, and never refuses to work
@@ -127,6 +129,9 @@ PLAN_TIMEOUT_S = 180.0
 # returns the page it reached instead of being killed with nothing.
 PLAN_MARGIN_S = 8.0
 CHROMIUM_START_S = 15.0
+# How long a Chromium whose CDP port has gone quiet gets to finish exiting: the
+# socket can close a moment before the process is gone.
+CHROMIUM_EXIT_GRACE_S = 3.0
 TEXT_LIMIT_BYTES = 8 * 1024
 
 TOOL = {
@@ -563,15 +568,22 @@ class Chromium:
         return self.proc is not None and self.proc.poll() is None
 
     def close_if_exited(self):
-        """Why the Chromium this process started has exited, or None while it
-        runs (or when none was started here).
+        """Why the Chromium this process started has gone, or None while it
+        still answers (or when none was started here).
 
-        An exited one is closed, which removes its profile directory, and its
+        A gone one is closed, which removes its profile directory, and its
         binary is set aside for the next start. The reason is the last FATAL
         line of its own log, read first because the log lives in that
         profile."""
-        if self.proc is None or self.proc.poll() is None:
+        if self.proc is None:
             return None
+        if self.proc.poll() is None:
+            if cdp_answers(self.url):
+                return None
+            try:
+                self.proc.wait(timeout=CHROMIUM_EXIT_GRACE_S)
+            except subprocess.TimeoutExpired:
+                pass
         said = ""
         if self.profile:
             try:
@@ -581,7 +593,9 @@ class Chromium:
             except OSError:
                 pass
         fatal = [line for line in said.splitlines() if ":FATAL:" in line]
-        if fatal:
+        if self.proc.poll() is None:
+            reason = "it stopped answering on its CDP port"
+        elif fatal:
             reason = fatal[-1].split("] ", 1)[-1].strip().rstrip(".")
         else:
             reason = "exit status %s" % self.proc.returncode
@@ -892,16 +906,41 @@ class Browse:
         except Exception as exc:
             log("prewarm skipped: %s" % exc)
 
-    def _ask_with_chromium(self, request, params, key, clone, deadline):
-        """The agent's answer, on a Chromium that stays up for the call.
+    def _explain(self, exc):
+        """The agent's error, or what our own Chromium said as it died under
+        the call.
 
-        A browser of ours that exits mid-call takes the agent's CDP socket
-        with it, and all the agent can say is "no close frame received or
-        sent". So its own exit reason is read, and the call is tried once more
-        on a fresh browser, from the next-newest binary when there is one. A
-        second exit is an error that names the binary and what it said."""
-        for attempt in (1, 2):
+        A browser that exits mid-call takes the agent's CDP socket with it,
+        and all the agent can say is "no close frame received or sent". The
+        call is not replayed: the agent may already have submitted a form or
+        posted a message, so a retry is the caller's decision."""
+        with self.lock:
+            binary = self.chromium.binary
+            reason = self.chromium.close_if_exited()
+        if reason is None:
+            return str(exc)
+        return ("Chromium (%s) exited during the call: %s. The agent said: %s. Whether the "
+                "goal's actions took effect is unknown, so it was not replayed. The next "
+                "call starts a fresh browser, from another installed build when there is "
+                "one. If it keeps happening, set JEV_BROWSE_CHROMIUM to a newer build or "
+                "run `npx playwright install chromium`." % (binary, reason, exc))
+
+    def call(self, args):
+        started = time.monotonic()
+        params = parse_arguments(args)
+        deadline = started + call_timeout_s(params["plan"])
+        clone = resolve_clone()
+        key = resolve_key()
+        try:
             cdp_url = self.ensure_chromium()
+            request = dict(params, op="plan" if params["plan"] else "browse")
+            if params["screenshot"]:
+                directory = state_dir()
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                self.calls += 1
+                request["screenshot_path"] = str(directory / (
+                    "browse-%s-%d-%d.png" % (time.strftime("%Y%m%d-%H%M%S"),
+                                             os.getpid(), self.calls)))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
@@ -911,47 +950,14 @@ class Browse:
             # The daemon starts on the worker's first use, so a call that
             # raises from here on still leaves one to stop.
             self.daemon_used = True
-            try:
-                return self.ask(request, self.child_env(key, cdp_url), clone, remaining)
-            except BrowseTimeout:
-                raise
-            except BrowseError as exc:
-                with self.lock:
-                    binary = self.chromium.binary
-                    reason = self.chromium.close_if_exited()
-                if reason is None:
-                    raise
-                if attempt == 2:
-                    raise BrowseError(
-                        "Chromium (%s) exited during the call: %s. The agent said: %s. "
-                        "Set JEV_BROWSE_CHROMIUM to a newer build, or run `npx playwright "
-                        "install chromium`." % (binary, reason, exc))
-                log("this server's Chromium (%s) exited during the call: %s. Retrying on "
-                    "a fresh one" % (binary, reason))
-
-    def call(self, args):
-        started = time.monotonic()
-        params = parse_arguments(args)
-        deadline = started + call_timeout_s(params["plan"])
-        clone = resolve_clone()
-        key = resolve_key()
-        try:
-            request = dict(params, op="plan" if params["plan"] else "browse")
-            if params["screenshot"]:
-                directory = state_dir()
-                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                self.calls += 1
-                request["screenshot_path"] = str(directory / (
-                    "browse-%s-%d-%d.png" % (time.strftime("%Y%m%d-%H%M%S"),
-                                             os.getpid(), self.calls)))
-            result = self._ask_with_chromium(request, params, key, clone, deadline)
+            result = self.ask(request, self.child_env(key, cdp_url), clone, remaining)
         except BrowseTimeout:
             # The killed agent leaves its tab behind. A browser we own is
             # cheaper to restart than to clean; one we do not own is left be.
             self.chromium.close()
             raise
         except BrowseError as exc:
-            raise BrowseError(scrub(str(exc), secrets_of(key)))
+            raise BrowseError(scrub(self._explain(exc), secrets_of(key)))
         text, truncated = trim_text(result.get("text"))
         out = {
             "final_url": result.get("final_url"),

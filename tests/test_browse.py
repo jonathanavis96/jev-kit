@@ -550,19 +550,10 @@ class TestErrorPaths(CallCase):
         self.assertTrue(result["isError"])
         run.assert_not_called()
 
-    def test_a_chromium_that_exits_mid_call_is_replaced_and_the_call_retried(self):
+    def test_a_chromium_that_exits_mid_call_is_named_and_never_replayed(self):
         """2026-10-12: the browser aborted two seconds in, and all the agent
-        could say was its CDP socket closing under it."""
-        self.browse.chromium.close_if_exited.side_effect = ["GPU process isn't usable. Goodbye", None]
-        with mock.patch.object(self.browse, "ask", side_effect=[
-                server.BrowseError("RuntimeError: no close frame received or sent"),
-                dict(self.RESULT)]) as run:
-            result = call(self.srv, goal="open https://example.com")
-        self.assertFalse(result["isError"], result)
-        self.assertEqual(run.call_count, 2)
-        self.assertEqual(self.browse.chromium.ensure.call_count, 2)
-
-    def test_a_chromium_that_exits_twice_is_named_in_the_error(self):
+        could say was its CDP socket closing under it. The goal is not run
+        again: it may already have submitted a form."""
         self.browse.chromium.close_if_exited.return_value = "GPU process isn't usable. Goodbye"
         self.browse.chromium.binary = "/opt/chromium-815036/chrome"
         with mock.patch.object(self.browse, "ask", side_effect=server.BrowseError(
@@ -573,17 +564,19 @@ class TestErrorPaths(CallCase):
         self.assertIn("/opt/chromium-815036/chrome", text)
         self.assertIn("GPU process isn't usable", text)
         self.assertIn("no close frame", text)
+        self.assertIn("not replayed", text)
         self.assertIn("JEV_BROWSE_CHROMIUM", text)
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
+        self.browse.chromium.close_if_exited.assert_called_once_with()
 
-    def test_an_agent_error_with_the_browser_still_up_is_not_retried(self):
+    def test_an_agent_error_with_the_browser_still_up_is_passed_through(self):
         with mock.patch.object(self.browse, "ask",
                                side_effect=server.BrowseError("KeyError: x")) as run:
             result = call(self.srv, goal="open https://example.com")
         self.assertTrue(result["isError"])
+        self.assertEqual(result["content"][0]["text"], "browse failed: KeyError: x")
         self.assertEqual(run.call_count, 1)
         self.browse.chromium.close.assert_not_called()
-        self.browse.chromium.ensure.assert_called_once_with()
 
     def test_a_bad_argument_is_an_error_result_not_a_crash(self):
         result = call(self.srv, goal="no url in here")
@@ -859,28 +852,58 @@ class TestChromium(unittest.TestCase):
             # Still found when it is the only one there.
             self.assertIn("chromium-815036", server.find_chromium())
 
-    def test_an_exited_chromium_is_closed_and_its_binary_set_aside(self):
+    def gone_chromium(self, log_text="", **proc):
         c = server.Chromium()
         c.binary = "/pw/chromium-815036/chrome-linux/chrome"
+        c.url = "http://127.0.0.1:1"
         c.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
         self.addCleanup(__import__("shutil").rmtree, c.profile, True)
-        Path(c.profile, "chromium-stderr.log").write_text(
-            "DevTools listening on ws://127.0.0.1:1/devtools/browser/x\n"
-            "[1012/192049.313805:WARNING:gpu_process_host.cc(1262)] The GPU process has crashed 9 time(s)\n"
-            "[1012/192049.313844:FATAL:gpu_data_manager_impl_private.cc(445)] GPU process isn't usable. Goodbye.\n"
-            "#0 0x5854996a02f9 base::debug::CollectStackTrace()\n")
-        c.proc = mock.Mock(**{"poll.return_value": None})
-        self.assertIsNone(c.close_if_exited(), "still running")
-        self.assertEqual(c.failed, set())
+        Path(c.profile, "chromium-stderr.log").write_text(log_text)
+        c.proc = mock.Mock(**proc)
+        return c
+
+    GPU_LOG = (
+        "DevTools listening on ws://127.0.0.1:1/devtools/browser/x\n"
+        "[1012/192049.313805:WARNING:gpu_process_host.cc(1262)] The GPU process has crashed 9 time(s)\n"
+        "[1012/192049.313844:FATAL:gpu_data_manager_impl_private.cc(445)] GPU process isn't usable. Goodbye.\n"
+        "#0 0x5854996a02f9 base::debug::CollectStackTrace()\n")
+
+    def test_an_exited_chromium_is_closed_and_its_binary_set_aside(self):
+        c = self.gone_chromium(self.GPU_LOG, **{"poll.return_value": 1, "returncode": 1})
         profile = c.profile
-        c.proc = mock.Mock(**{"poll.return_value": 1, "returncode": 1})
         self.assertEqual(c.close_if_exited(), "GPU process isn't usable. Goodbye")
         self.assertEqual(c.failed, {"/pw/chromium-815036/chrome-linux/chrome"})
         self.assertIsNone(c.proc)
         self.assertFalse(os.path.exists(profile))
-        c.proc = mock.Mock(**{"poll.return_value": 1, "returncode": 1})
-        self.assertEqual(c.close_if_exited(), "exit status 1", "no log to read")
+        c = self.gone_chromium(**{"poll.return_value": 1, "returncode": 1})
+        self.assertEqual(c.close_if_exited(), "exit status 1", "no FATAL line")
         self.assertIsNone(server.Chromium().close_if_exited(), "nothing was started")
+
+    def test_a_running_chromium_that_answers_is_left_alone(self):
+        c = self.gone_chromium(**{"poll.return_value": None})
+        with mock.patch.object(server, "cdp_answers", return_value=True):
+            self.assertIsNone(c.close_if_exited())
+        self.assertEqual(c.failed, set())
+        self.assertTrue(os.path.exists(c.profile))
+        c.proc.wait.assert_not_called()
+
+    def test_a_chromium_still_shutting_down_is_waited_for(self):
+        """Codex on PR #38: the CDP socket can close a moment before poll()
+        sees the exit, and that window must not read as a healthy browser."""
+        c = self.gone_chromium(self.GPU_LOG, **{"poll.side_effect": [None, 1, 1, 1],
+                                                "returncode": 1})
+        with mock.patch.object(server, "cdp_answers", return_value=False):
+            self.assertEqual(c.close_if_exited(), "GPU process isn't usable. Goodbye")
+        self.assertEqual(c.failed, {"/pw/chromium-815036/chrome-linux/chrome"})
+
+    def test_a_chromium_that_stops_answering_but_never_exits_is_closed(self):
+        c = self.gone_chromium(**{"poll.return_value": None, "pid": 4242,
+                                  "wait.side_effect": subprocess.TimeoutExpired("chrome", 3)})
+        with mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server.os, "killpg"):
+            self.assertEqual(c.close_if_exited(), "it stopped answering on its CDP port")
+        self.assertIsNone(c.proc)
+        self.assertIn("/pw/chromium-815036/chrome-linux/chrome", c.failed)
 
     def test_a_binary_that_failed_is_passed_over_while_another_is_installed(self):
         tmp = tempfile.mkdtemp()
