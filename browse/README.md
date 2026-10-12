@@ -186,6 +186,7 @@ back as an `isError` result, and the read loop keeps going.
 | The call ran past `JEV_BROWSE_TIMEOUT` (default 90 s) | the timeout. The agent is killed, and a Chromium this server owns is restarted. |
 | No Chromium binary anywhere | `npx playwright install chromium` and `JEV_BROWSE_CHROMIUM` |
 | Chromium has no usable sandbox | `JEV_BROWSE_NO_SANDBOX`, see below |
+| Our Chromium exited during the call, twice | the binary and its own last `FATAL` line. The first exit is retried on a fresh browser, from the next-newest installed binary when there is one. |
 | A bad argument | the argument |
 
 ### `blocked` hands the browser back
@@ -268,7 +269,7 @@ comes back.
 | `JEV_ULTRAFAST_VENV` | `$AIRLOCK_HOME/jev-ultrafast-venv` | The agent's Python environment. Outside the release on purpose, so a deploy does not rebuild it. |
 | `BU_CDP_URL` | unset | A Chromium to attach to instead of starting one. Only an explicit value counts. |
 | `JEV_BROWSE_TIMEOUT` | `90` | Seconds allowed for a call. |
-| `JEV_BROWSE_CHROMIUM` | newest in the Playwright cache, then `PATH` | The binary to start. |
+| `JEV_BROWSE_CHROMIUM` | newest in the Playwright cache, then `PATH` | The binary to start. A pre-2021 `chromium-8xxxxx` directory ranks below any current one. |
 | `JEV_BROWSE_NO_SANDBOX` | unset | `1` adds `--no-sandbox`. Read the section above first. |
 | `JEV_BROWSE_PREWARM` | unset | `1` warms Chromium, the worker and the text model at start-up. |
 | `TEXT_MODEL_API_KEY` | unset | Selects the OpenAI-compatible helper. Also read from the key file. |
