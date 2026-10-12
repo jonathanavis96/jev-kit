@@ -215,6 +215,11 @@ class BrowseTimeout(BrowseError):
     """The per-call time ran out and the agent was killed."""
 
 
+class SandboxRefused(BrowseError):
+    """Chromium would not start without a usable sandbox. Another binary would
+    refuse the same way, so nothing else is tried."""
+
+
 def log(message):
     # stdout belongs to the protocol. Everything else goes to stderr.
     try:
@@ -659,12 +664,30 @@ class Chromium:
         if foreign:
             log("%d other Chromium process(es) on this box; starting our own anyway"
                 % len(foreign))
-        binary = find_chromium(skip=self.failed)
-        if not binary or not os.path.isfile(binary):
-            raise BrowseError(
-                "no Chromium binary found. Install one with `npx playwright install "
-                "chromium`, or set JEV_BROWSE_CHROMIUM to a Chromium or Chrome binary."
-            )
+        # Starting a browser has no side effects, so one that will not start is
+        # set aside and the next installed binary is tried in the same call.
+        tried, failure = set(), None
+        while True:
+            binary = find_chromium(skip=self.failed)
+            if not binary or not os.path.isfile(binary):
+                raise BrowseError(
+                    "no Chromium binary found. Install one with `npx playwright install "
+                    "chromium`, or set JEV_BROWSE_CHROMIUM to a Chromium or Chrome binary."
+                )
+            if os.path.realpath(binary) in tried:
+                raise failure
+            tried.add(os.path.realpath(binary))
+            try:
+                return self._start(binary)
+            except SandboxRefused:
+                raise
+            except BrowseError as exc:
+                self.failed.add(binary)
+                failure = exc
+                log("%s Trying the next installed Chromium, if there is one." % exc)
+
+    def _start(self, binary):
+        """Start `binary` headless on a free port and return its CDP URL."""
         port = free_port()
         self.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
         command = [binary, "--headless=new", "--remote-debugging-port=%d" % port,
@@ -698,7 +721,7 @@ class Chromium:
             said = ""
         self.close()
         if "No usable sandbox" in said:
-            raise BrowseError(
+            raise SandboxRefused(
                 "Chromium (%s) refused to start: no usable sandbox. On Ubuntu 23.10+ "
                 "AppArmor denies user namespaces to a binary with no profile. Give the "
                 "binary an AppArmor profile, or accept an unsandboxed browser by setting "

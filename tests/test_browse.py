@@ -1010,6 +1010,57 @@ class TestChromium(unittest.TestCase):
             self.assertEqual(server.find_chromium(skip={paths["1243"]}), paths["1243"],
                              "a person chose it")
 
+    def two_builds(self, newer, older):
+        """A Playwright cache holding two shell stand-ins, newest first."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        out = []
+        for rev, script in (("1243", newer), ("1234", older)):
+            binary = tmp / "pw" / ("chromium-" + rev) / "chrome-linux64" / "chrome"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\necho started >> %s/%s.ran\n%s" % (tmp, rev, script))
+            binary.chmod(0o755)
+            out.append(str(binary))
+        return tmp, out
+
+    def start_from(self, tmp, answers):
+        c = server.Chromium()
+        self.addCleanup(c.close)
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", return_value=None), \
+             mock.patch.object(server, "cdp_answers", side_effect=answers), \
+             mock.patch.object(server, "running_chromiums", return_value=[]):
+            for var in ("JEV_BROWSE_CHROMIUM", "BU_CDP_URL", "JEV_BROWSE_NO_SANDBOX"):
+                os.environ.pop(var, None)
+            return c, c.ensure()
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_a_binary_that_dies_at_startup_is_set_aside_and_the_next_one_started(self):
+        """Codex on PR #38: a build that exits before opening its CDP port was
+        closed without a note, so every call started the same one again."""
+        tmp, (newer, older) = self.two_builds("exit 1\n", "exec sleep 30\n")
+        c, url = self.start_from(tmp, lambda *a, **k: (tmp / "1234.ran").exists())
+        self.assertTrue(url.startswith("http://127.0.0.1:"))
+        self.assertEqual(c.binary, older)
+        self.assertEqual(c.failed, {newer})
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_when_every_binary_dies_at_startup_the_last_failure_is_raised(self):
+        tmp, (newer, older) = self.two_builds("exit 1\n", "exit 1\n")
+        with self.assertRaises(server.BrowseError) as caught:
+            self.start_from(tmp, lambda *a, **k: False)
+        self.assertIn("chromium-1234", str(caught.exception))
+        self.assertTrue((tmp / "1243.ran").exists() and (tmp / "1234.ran").exists())
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_a_sandbox_refusal_is_not_tried_on_another_binary(self):
+        refuse = 'echo "FATAL: No usable sandbox!" >&2\nexit 134\n'
+        tmp, _ = self.two_builds(refuse, refuse)
+        with self.assertRaises(server.SandboxRefused):
+            self.start_from(tmp, lambda *a, **k: False)
+        self.assertFalse((tmp / "1234.ran").exists())
+
     @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
     def test_a_sandbox_refusal_says_so_and_never_falls_back(self):
         tmp = tempfile.mkdtemp()
