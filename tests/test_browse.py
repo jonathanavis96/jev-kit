@@ -578,6 +578,22 @@ class TestErrorPaths(CallCase):
         self.assertEqual(run.call_count, 1)
         self.browse.chromium.close.assert_not_called()
 
+    def test_a_chromium_that_dies_under_the_prewarm_is_set_aside_and_warmed_again(self):
+        """Codex on PR #38. A warm-up has no side effects, so unlike a goal it
+        is safe to run once more on the fresh browser."""
+        self.browse.chromium.close_if_exited.side_effect = ["GPU process isn't usable. Goodbye", None]
+        with mock.patch.object(self.browse, "ask", side_effect=[
+                server.BrowseError("RuntimeError: no close frame received or sent"),
+                {"warmed": ["harness"]}]) as run:
+            self.browse.prewarm()
+        self.assertEqual([c.args[0] for c in run.call_args_list], [{"op": "warm"}] * 2)
+        self.assertEqual(self.browse.chromium.ensure.call_count, 2)
+
+    def test_a_prewarm_with_the_browser_still_up_is_not_repeated(self):
+        with mock.patch.object(self.browse, "ask", return_value={"warmed": ["harness"]}) as run:
+            self.browse.prewarm()
+        self.assertEqual(run.call_count, 1)
+
     def test_a_bad_argument_is_an_error_result_not_a_crash(self):
         result = call(self.srv, goal="no url in here")
         self.assertTrue(result["isError"])
@@ -810,6 +826,23 @@ class TestChromium(unittest.TestCase):
         self.assertIsNone(c.proc)
         self.assertIsNone(c.profile)
         self.assertFalse(os.path.exists(stale))
+
+    def test_a_chromium_that_died_between_calls_is_set_aside(self):
+        """Codex on PR #38: a browser that died after a prewarm, or between
+        calls, was closed without a note, and the same build started again."""
+        c = server.Chromium()
+        c.binary = "/pw/chromium-815036/chrome-linux/chrome"
+        c.proc = mock.Mock(**{"poll.return_value": 1, "returncode": 1, "pid": 4242})
+        c.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
+        c.url = "http://127.0.0.1:1"
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums", return_value=[]), \
+             mock.patch.object(server, "find_chromium", return_value=None) as find:
+            os.environ.pop("BU_CDP_URL", None)
+            with self.assertRaises(server.BrowseError):
+                c.ensure()
+        find.assert_called_once_with(skip={"/pw/chromium-815036/chrome-linux/chrome"})
 
     def test_no_binary_is_a_message(self):
         c = server.Chromium()

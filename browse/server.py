@@ -640,9 +640,14 @@ class Chromium:
         if self.owned() and cdp_answers(self.url):
             return self.url
         if self.proc is not None:
-            # Ours, but gone or unreachable. close() reaps it and removes its
-            # profile directory, so a restart cannot leave either behind.
-            log("this server's Chromium is no longer answering; starting a fresh one")
+            # Ours, but gone or unreachable. close_if_exited() sets its binary
+            # aside whenever it died, between calls or after a prewarm as much
+            # as during a call, and close() reaps it and removes its profile
+            # directory, so a restart cannot leave either behind.
+            binary = self.binary
+            reason = self.close_if_exited()
+            log("this server's Chromium (%s) is no longer answering%s; starting a fresh one"
+                % (binary, ": %s" % reason if reason else ""))
         self.close()
         configured = os.environ.get("BU_CDP_URL")
         if configured and cdp_answers(configured):
@@ -913,9 +918,25 @@ class Browse:
         try:
             clone = resolve_clone()
             key = resolve_key()
-            cdp_url = self.ensure_chromium()
-            self.daemon_used = True
-            result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
+            for attempt in (1, 2):
+                cdp_url = self.ensure_chromium()
+                self.daemon_used = True
+                result, failure = None, None
+                try:
+                    result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
+                except BrowseError as exc:
+                    failure = exc
+                # A browser that died under the warm-up is set aside now, so the
+                # first real call does not start the same build again.
+                with self.lock:
+                    binary = self.chromium.binary
+                    reason = self.chromium.close_if_exited()
+                if reason is None or attempt == 2:
+                    break
+                # Unlike a goal, a warm-up has no side effects to repeat.
+                log("this server's Chromium (%s) exited during the prewarm: %s" % (binary, reason))
+            if failure is not None:
+                raise failure
             log("prewarmed: %s" % ", ".join(result.get("warmed") or ["nothing"]))
         except Exception as exc:
             log("prewarm skipped: %s" % exc)
