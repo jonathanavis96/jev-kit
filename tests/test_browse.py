@@ -847,7 +847,8 @@ class TestChromium(unittest.TestCase):
             self.assertIn("chromium-1243", server.find_chromium())
         (Path(tmp) / "chromium-1217").rename(Path(tmp) / "gone")
         (Path(tmp) / "chromium-1243").rename(Path(tmp) / "gone2")
-        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}):
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": tmp}), \
+             mock.patch.object(server.shutil, "which", return_value=None):
             os.environ.pop("JEV_BROWSE_CHROMIUM", None)
             # Still found when it is the only one there.
             self.assertIn("chromium-815036", server.find_chromium())
@@ -904,6 +905,25 @@ class TestChromium(unittest.TestCase):
             self.assertEqual(c.close_if_exited(), "it stopped answering on its CDP port")
         self.assertIsNone(c.proc)
         self.assertIn("/pw/chromium-815036/chrome-linux/chrome", c.failed)
+
+    def test_a_legacy_build_loses_across_roots_and_to_path(self):
+        """Codex on PR #38: ranking one root at a time let a legacy build in
+        PLAYWRIGHT_BROWSERS_PATH win over a current one in the default cache."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        legacy = tmp / "pw" / "chromium-815036" / "chrome-linux" / "chrome"
+        current = tmp / "home" / ".cache" / "ms-playwright" / "chromium-1243" / "chrome-linux64" / "chrome"
+        for binary in (legacy, current):
+            binary.parent.mkdir(parents=True)
+            binary.write_text("")
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", return_value="/usr/bin/chromium"):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            self.assertEqual(server.find_chromium(), str(current))
+            current.unlink()
+            self.assertEqual(server.find_chromium(), "/usr/bin/chromium")
+            self.assertEqual(server.find_chromium(skip={"/usr/bin/chromium"}), str(legacy))
 
     def test_a_binary_that_failed_is_passed_over_while_another_is_installed(self):
         tmp = tempfile.mkdtemp()

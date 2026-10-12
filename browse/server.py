@@ -514,17 +514,18 @@ def find_chromium(skip=()):
     roots = [os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
              str(Path.home() / ".cache" / "ms-playwright"),
              str(Path.home() / "Library" / "Caches" / "ms-playwright")]
-    candidates = []
+    found = []
     for root in filter(None, roots):
-        found = []
         for pattern in ("chromium-*/chrome-linux*/chrome",
                         "chromium-*/chrome-mac*/Chromium.app/Contents/MacOS/Chromium"):
             found.extend(glob.glob(os.path.join(os.path.expanduser(root), pattern)))
-        candidates += sorted(found, key=_revision, reverse=True)
-    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
-        path = shutil.which(name)
-        if path:
-            candidates.append(path)
+    # Ranked across every root at once. A legacy build comes last, behind even
+    # a Chromium on PATH, because nothing else is as likely not to start.
+    found.sort(key=_revision, reverse=True)
+    current = [path for path in found if _revision(path)[0]]
+    on_path = [shutil.which(name) for name in
+               ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")]
+    candidates = current + [path for path in on_path if path] + found[len(current):]
     for path in candidates:
         if path not in skip:
             return path
