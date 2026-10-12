@@ -880,6 +880,16 @@ class TestChromium(unittest.TestCase):
         self.assertEqual(c.close_if_exited(), "exit status 1", "no FATAL line")
         self.assertIsNone(server.Chromium().close_if_exited(), "nothing was started")
 
+    def test_the_fatal_line_is_read_from_the_end_of_a_long_log(self):
+        """Codex on PR #38: a browser reused for hours logs more than the
+        window read, and the FATAL that matters is the last one written."""
+        log_text = ("[1012/080000.000001:FATAL:old.cc(1)] An old, survived complaint.\n"
+                    + "[1012/090000.000001:WARNING:noise.cc(1)] padding\n" * 8000
+                    + self.GPU_LOG)
+        self.assertGreater(len(log_text), server.CRASH_LOG_TAIL_BYTES)
+        c = self.gone_chromium(log_text, **{"poll.return_value": 1, "returncode": 1})
+        self.assertEqual(c.close_if_exited(), "GPU process isn't usable. Goodbye")
+
     def test_a_running_chromium_that_answers_is_left_alone(self):
         c = self.gone_chromium(**{"poll.return_value": None})
         with mock.patch.object(server, "cdp_answers", return_value=True):
@@ -924,6 +934,29 @@ class TestChromium(unittest.TestCase):
             current.unlink()
             self.assertEqual(server.find_chromium(), "/usr/bin/chromium")
             self.assertEqual(server.find_chromium(skip={"/usr/bin/chromium"}), str(legacy))
+
+    @unittest.skipIf(os.name == "nt", "symlinks")
+    def test_a_failed_binary_is_skipped_under_every_name(self):
+        """Codex on PR #38: google-chrome linked to google-chrome-stable is one
+        binary, and skipping one name must not start it again under the other."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, tmp, True)
+        real = tmp / "opt" / "chrome"
+        real.parent.mkdir()
+        real.write_text("")
+        (tmp / "google-chrome").symlink_to(real)
+        (tmp / "google-chrome-stable").symlink_to(real)
+        legacy = tmp / "pw" / "chromium-815036" / "chrome-linux" / "chrome"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("")
+        names = {"google-chrome": str(tmp / "google-chrome"),
+                 "google-chrome-stable": str(tmp / "google-chrome-stable")}
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", side_effect=names.get):
+            os.environ.pop("JEV_BROWSE_CHROMIUM", None)
+            self.assertEqual(server.find_chromium(), names["google-chrome"])
+            self.assertEqual(server.find_chromium(skip={names["google-chrome"]}), str(legacy))
 
     def test_a_binary_that_failed_is_passed_over_while_another_is_installed(self):
         tmp = tempfile.mkdtemp()

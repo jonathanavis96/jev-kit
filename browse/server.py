@@ -132,6 +132,8 @@ CHROMIUM_START_S = 15.0
 # How long a Chromium whose CDP port has gone quiet gets to finish exiting: the
 # socket can close a moment before the process is gone.
 CHROMIUM_EXIT_GRACE_S = 3.0
+# How much of the end of a dead Chromium's own log is searched for its FATAL line.
+CRASH_LOG_TAIL_BYTES = 256 * 1024
 TEXT_LIMIT_BYTES = 8 * 1024
 
 TOOL = {
@@ -506,8 +508,10 @@ def find_chromium(skip=()):
     newest Playwright build, then one on PATH.
 
     A binary in `skip` is passed over while any other one is installed, and
-    used anyway when it is the only one. An explicit JEV_BROWSE_CHROMIUM is
-    never passed over: a person chose it."""
+    used anyway when it is the only one. Paths are compared once resolved, so
+    `google-chrome` and the `google-chrome-stable` it links to count as one
+    binary. An explicit JEV_BROWSE_CHROMIUM is never passed over: a person
+    chose it."""
     explicit = os.environ.get("JEV_BROWSE_CHROMIUM")
     if explicit:
         return os.path.expanduser(explicit)
@@ -525,9 +529,15 @@ def find_chromium(skip=()):
     current = [path for path in found if _revision(path)[0]]
     on_path = [shutil.which(name) for name in
                ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")]
-    candidates = current + [path for path in on_path if path] + found[len(current):]
+    candidates, seen = [], set()
+    for path in current + [path for path in on_path if path] + found[len(current):]:
+        real = os.path.realpath(path)
+        if real not in seen:
+            seen.add(real)
+            candidates.append(path)
+    skipped = {os.path.realpath(path) for path in skip}
     for path in candidates:
-        if path not in skip:
+        if os.path.realpath(path) not in skipped:
             return path
     return candidates[0] if candidates else None
 
@@ -587,10 +597,13 @@ class Chromium:
                 pass
         said = ""
         if self.profile:
+            # The tail: a browser reused for hours can log far more than this,
+            # and the line that matters is the one written as it died.
             try:
-                with open(os.path.join(self.profile, "chromium-stderr.log"), "r",
-                          errors="replace") as f:
-                    said = f.read(256 * 1024)
+                with open(os.path.join(self.profile, "chromium-stderr.log"), "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(f.tell() - CRASH_LOG_TAIL_BYTES, 0))
+                    said = f.read().decode("utf-8", errors="replace")
             except OSError:
                 pass
         fatal = [line for line in said.splitlines() if ":FATAL:" in line]
