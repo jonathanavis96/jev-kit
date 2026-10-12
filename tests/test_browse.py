@@ -589,6 +589,41 @@ class TestErrorPaths(CallCase):
         self.assertEqual([c.args[0] for c in run.call_args_list], [{"op": "warm"}] * 2)
         self.assertEqual(self.browse.chromium.ensure.call_count, 2)
 
+    def lock_is_free_elsewhere(self):
+        """Whether another thread could take the server's lock right now."""
+        took = []
+
+        def probe():
+            if self.browse.lock.acquire(timeout=0.2):
+                took.append(True)
+                self.browse.lock.release()
+        t = __import__("threading").Thread(target=probe)
+        t.start()
+        t.join()
+        return bool(took)
+
+    def test_a_call_and_a_prewarm_each_hold_the_lock_from_browser_to_answer(self):
+        """Codex on PR #38: a prewarm could replace the browser between a call
+        taking its URL and the call reaching the worker."""
+        seen = []
+        real_child_env = self.browse.child_env
+
+        def child_env(*args):
+            seen.append(self.lock_is_free_elsewhere())
+            return real_child_env(*args)
+        with mock.patch.object(self.browse, "child_env", side_effect=child_env), \
+             mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
+            call(self.srv, goal="open https://example.com")
+            self.browse.prewarm()
+        self.assertEqual(seen, [False, False])
+
+    def test_a_call_passes_its_deadline_to_the_browser_start(self):
+        with mock.patch.object(self.browse, "ask", return_value=dict(self.RESULT)):
+            started = time.monotonic()
+            call(self.srv, goal="open https://example.com")
+        deadline = self.browse.chromium.ensure.call_args.kwargs["deadline"]
+        self.assertAlmostEqual(deadline - started, server.DEFAULT_TIMEOUT_S, delta=5)
+
     def test_a_prewarm_with_the_browser_still_up_is_not_repeated(self):
         with mock.patch.object(self.browse, "ask", return_value={"warmed": ["harness"]}) as run:
             self.browse.prewarm()
@@ -1052,6 +1087,28 @@ class TestChromium(unittest.TestCase):
             self.start_from(tmp, lambda *a, **k: False)
         self.assertIn("chromium-1234", str(caught.exception))
         self.assertTrue((tmp / "1243.ran").exists() and (tmp / "1234.ran").exists())
+
+    @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
+    def test_starting_stops_at_the_call_deadline(self):
+        """Codex on PR #38: builds that stay up without opening CDP each took
+        the full start timeout, one after another, past the call's own."""
+        tmp, _ = self.two_builds("exec sleep 30\n", "exec sleep 30\n")
+        c = server.Chromium()
+        self.addCleanup(c.close)
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"PLAYWRIGHT_BROWSERS_PATH": str(tmp / "pw")}), \
+             mock.patch.object(server.Path, "home", return_value=tmp / "home"), \
+             mock.patch.object(server.shutil, "which", return_value=None), \
+             mock.patch.object(server, "cdp_answers", return_value=False), \
+             mock.patch.object(server, "running_chromiums", return_value=[]):
+            for var in ("JEV_BROWSE_CHROMIUM", "BU_CDP_URL", "JEV_BROWSE_NO_SANDBOX"):
+                os.environ.pop(var, None)
+            with self.assertRaises(server.BrowseTimeout):
+                c.ensure(deadline=started + 1.0)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertEqual(c.failed, set(), "running out of time is not the binary's fault")
+        self.assertFalse((tmp / "1234.ran").exists())
+        self.assertFalse(c.owned())
 
     @unittest.skipIf(os.name == "nt", "a shell stand-in for the binary")
     def test_a_sandbox_refusal_is_not_tried_on_another_binary(self):

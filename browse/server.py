@@ -636,12 +636,14 @@ class Chromium:
             rows.append((pid, cmd))
         return rows
 
-    def ensure(self):
+    def ensure(self, deadline=None):
         """The CDP URL to use, starting this server's own Chromium if needed.
 
         Never attaches to, and never kills, a browser this process did not
         start. The one exception is an explicitly set `BU_CDP_URL`, which is a
-        person naming a browser to share."""
+        person naming a browser to share. With `deadline` (a time.monotonic()
+        value), starting gives up with BrowseTimeout once it passes, however
+        many binaries are left to try."""
         if self.owned() and cdp_answers(self.url):
             return self.url
         if self.proc is not None:
@@ -676,18 +678,25 @@ class Chromium:
                 )
             if os.path.realpath(binary) in tried:
                 raise failure
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BrowseTimeout("the call's time ran out (JEV_BROWSE_TIMEOUT) before a "
+                                    "Chromium would start. %s" % failure)
             tried.add(os.path.realpath(binary))
             try:
-                return self._start(binary)
-            except SandboxRefused:
+                return self._start(binary, deadline)
+            except (SandboxRefused, BrowseTimeout):
                 raise
             except BrowseError as exc:
                 self.failed.add(binary)
                 failure = exc
                 log("%s Trying the next installed Chromium, if there is one." % exc)
 
-    def _start(self, binary):
-        """Start `binary` headless on a free port and return its CDP URL."""
+    def _start(self, binary, deadline=None):
+        """Start `binary` headless on a free port and return its CDP URL.
+
+        It gets CHROMIUM_START_S to open the port, or what is left before
+        `deadline` when that is sooner. Running out of the call's time is a
+        BrowseTimeout, not a fault of the binary."""
         port = free_port()
         self.profile = tempfile.mkdtemp(prefix="jev-browse-profile-")
         command = [binary, "--headless=new", "--remote-debugging-port=%d" % port,
@@ -708,12 +717,18 @@ class Chromium:
             self.close()
             raise BrowseError("could not start Chromium (%s): %s" % (binary, exc))
         self.url = "http://127.0.0.1:%d" % port
-        deadline = time.monotonic() + CHROMIUM_START_S
-        while time.monotonic() < deadline and proc.poll() is None:
+        limit = time.monotonic() + CHROMIUM_START_S
+        cut_short = deadline is not None and deadline < limit
+        until = deadline if cut_short else limit
+        while time.monotonic() < until and proc.poll() is None:
             if cdp_answers(self.url, timeout_s=1.0):
                 log("started headless Chromium pid %d on %s" % (proc.pid, self.url))
                 return self.url
             time.sleep(0.1)
+        if cut_short and proc.poll() is None:
+            self.close()
+            raise BrowseTimeout("the call's time ran out (JEV_BROWSE_TIMEOUT) while Chromium "
+                                "(%s) was starting." % binary)
         try:
             with open(stderr_path, "r", errors="replace") as f:
                 said = f.read(64 * 1024)
@@ -896,14 +911,14 @@ class Browse:
                 pass
         return text_model_env(env)
 
-    def ensure_chromium(self):
+    def ensure_chromium(self, deadline=None):
         """`Chromium.ensure()` under this server's lock.
 
         The background prewarm made this necessary: two threads in `ensure()`
         at once each started a browser, and only the second one was ever
         tracked or closed. One lock, one browser."""
         with self.lock:
-            return self.chromium.ensure()
+            return self.chromium.ensure(deadline=deadline)
 
     # --- the worker ----------------------------------------------------------
 
@@ -937,32 +952,40 @@ class Browse:
 
         Chromium, the worker process, the agent's imports, the harness daemon
         and the text model's own child. Never raises: a prewarm that fails
-        just leaves the first real call to do the work, exactly as before."""
+        just leaves the first real call to do the work, exactly as before.
+
+        The whole of it holds this server's lock, as a call does, so a call
+        never takes a browser's URL that a prewarm then replaces. A call
+        already waited for the prewarm's warm-up, so it costs no time."""
         try:
-            clone = resolve_clone()
-            key = resolve_key()
-            for attempt in (1, 2):
-                cdp_url = self.ensure_chromium()
-                self.daemon_used = True
-                result, failure = None, None
-                try:
-                    result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
-                except BrowseError as exc:
-                    failure = exc
-                # A browser that died under the warm-up is set aside now, so the
-                # first real call does not start the same build again.
-                with self.lock:
-                    binary = self.chromium.binary
-                    reason = self.chromium.close_if_exited()
-                if reason is None or attempt == 2:
-                    break
-                # Unlike a goal, a warm-up has no side effects to repeat.
-                log("this server's Chromium (%s) exited during the prewarm: %s" % (binary, reason))
-            if failure is not None:
-                raise failure
-            log("prewarmed: %s" % ", ".join(result.get("warmed") or ["nothing"]))
+            with self.lock:
+                self._prewarm()
         except Exception as exc:
             log("prewarm skipped: %s" % exc)
+
+    def _prewarm(self):
+        clone = resolve_clone()
+        key = resolve_key()
+        for attempt in (1, 2):
+            cdp_url = self.ensure_chromium(deadline=time.monotonic() + 60)
+            self.daemon_used = True
+            result, failure = None, None
+            try:
+                result = self.ask({"op": "warm"}, self.child_env(key, cdp_url), clone, 60)
+            except BrowseError as exc:
+                failure = exc
+            # A browser that died under the warm-up is set aside now, so the
+            # first real call does not start the same build again.
+            with self.lock:
+                binary = self.chromium.binary
+                reason = self.chromium.close_if_exited()
+            if reason is None or attempt == 2:
+                break
+            # Unlike a goal, a warm-up has no side effects to repeat.
+            log("this server's Chromium (%s) exited during the prewarm: %s" % (binary, reason))
+        if failure is not None:
+            raise failure
+        log("prewarmed: %s" % ", ".join(result.get("warmed") or ["nothing"]))
 
     def _explain(self, exc):
         """The agent's error, or what our own Chromium said as it died under
@@ -983,6 +1006,27 @@ class Browse:
                 "one. If it keeps happening, set JEV_BROWSE_CHROMIUM to a newer build or "
                 "run `npx playwright install chromium`." % (binary, reason, exc))
 
+    def _call(self, params, deadline, clone, key):
+        cdp_url = self.ensure_chromium(deadline=deadline)
+        request = dict(params, op="plan" if params["plan"] else "browse")
+        if params["screenshot"]:
+            directory = state_dir()
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.calls += 1
+            request["screenshot_path"] = str(directory / (
+                "browse-%s-%d-%d.png" % (time.strftime("%Y%m%d-%H%M%S"),
+                                         os.getpid(), self.calls)))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
+                                "the agent could start." % call_timeout_s(params["plan"]))
+        if params["plan"]:
+            request["budget_s"] = max(remaining - PLAN_MARGIN_S, 1.0)
+        # The daemon starts on the worker's first use, so a call that
+        # raises from here on still leaves one to stop.
+        self.daemon_used = True
+        return self.ask(request, self.child_env(key, cdp_url), clone, remaining)
+
     def call(self, args):
         started = time.monotonic()
         params = parse_arguments(args)
@@ -990,25 +1034,10 @@ class Browse:
         clone = resolve_clone()
         key = resolve_key()
         try:
-            cdp_url = self.ensure_chromium()
-            request = dict(params, op="plan" if params["plan"] else "browse")
-            if params["screenshot"]:
-                directory = state_dir()
-                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                self.calls += 1
-                request["screenshot_path"] = str(directory / (
-                    "browse-%s-%d-%d.png" % (time.strftime("%Y%m%d-%H%M%S"),
-                                             os.getpid(), self.calls)))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise BrowseTimeout("timed out after %.0f s (JEV_BROWSE_TIMEOUT) before "
-                                    "the agent could start." % call_timeout_s(params["plan"]))
-            if params["plan"]:
-                request["budget_s"] = max(remaining - PLAN_MARGIN_S, 1.0)
-            # The daemon starts on the worker's first use, so a call that
-            # raises from here on still leaves one to stop.
-            self.daemon_used = True
-            result = self.ask(request, self.child_env(key, cdp_url), clone, remaining)
+            # One transaction under the lock, from the browser's URL to the
+            # agent's answer, so nothing replaces the browser in between.
+            with self.lock:
+                result = self._call(params, deadline, clone, key)
         except BrowseTimeout:
             # The killed agent leaves its tab behind. A browser we own is
             # cheaper to restart than to clean; one we do not own is left be.
