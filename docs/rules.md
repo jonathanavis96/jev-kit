@@ -180,8 +180,8 @@ MCP call reaches the table with its name, and the name is all this needs.
   `browser_find`. Only while nothing has opened the session (see below).
 - **Always allowed, and they open the session**: the Playwright tools `browse`
   genuinely cannot express: `browser_file_upload`, `browser_run_code_unsafe`,
-  `browser_evaluate`, `browser_handle_dialog`, `browser_drag`, `browser_drop`
-  and `browser_network_request(s)`. They are never blocked and never
+  `browser_evaluate`, `browser_handle_dialog`, `browser_drag` and
+  `browser_drop`. They are never blocked and never
   warned, and the first one opens Playwright for the **rest of the session**
   (the match carries `open_session`; `airlock/enforce.py` writes the row
   through `browse_state.record_playwright_open`). Incident that motivated it
@@ -191,7 +191,8 @@ MCP call reaches the table with its name, and the name is all this needs.
 - **Housekeeping is allowed silently but opens nothing**: `browser_tabs`,
   `browser_close`, `browser_resize`, `browser_console_messages`,
   `browser_take_screenshot`, `browser_wait_for`, `browser_press_key`,
-  `browser_hover`, `browser_select_option` and `browser_emulate_media`. They
+  `browser_hover`, `browser_select_option`, `browser_emulate_media` and
+  `browser_network_request(s)` (passive, and callable on a blank page). They
   write no row, so calling one first does not unlock plain navigation: a cold
   `browser_navigate` after `browser_tabs` is still redirected to `browse`.
 - `browser_install` and anything unlisted never match.

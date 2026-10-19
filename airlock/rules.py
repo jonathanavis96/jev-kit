@@ -2163,13 +2163,14 @@ _PW_MCP_BROWSING = frozenset((
 _PW_MCP_ALWAYS_ALLOWED = frozenset((
     "browser_file_upload", "browser_run_code_unsafe", "browser_evaluate",
     "browser_handle_dialog", "browser_drag", "browser_drop",
-    "browser_network_request", "browser_network_requests",
 ))
 
 # Housekeeping and page-interaction helpers: allowed silently, but they do NOT
 # open the session. Letting them would let an agent call browser_tabs once and
-# then navigate freely, defeating the redirect. They write no row.
+# then navigate freely, defeating the redirect. They write no row. Network
+# inspection is here too: it is passive and works on a blank page.
 _PW_MCP_HOUSEKEEPING = frozenset((
+    "browser_network_request", "browser_network_requests",
     "browser_console_messages", "browser_emulate_media", "browser_resize",
     "browser_tabs", "browser_close", "browser_take_screenshot",
     "browser_wait_for", "browser_select_option", "browser_press_key",

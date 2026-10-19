@@ -1045,10 +1045,10 @@ class TestR11BrowseViaJev(unittest.TestCase):
     # `browse` cannot express these: never blocked, and they open the session.
     ALWAYS = ("browser_file_upload", "browser_run_code_unsafe",
               "browser_evaluate", "browser_handle_dialog", "browser_drag",
-              "browser_drop", "browser_network_request",
-              "browser_network_requests")
+              "browser_drop")
     # Allowed silently, open nothing.
-    HOUSEKEEPING = ("browser_console_messages", "browser_emulate_media",
+    HOUSEKEEPING = ("browser_network_request", "browser_network_requests",
+                    "browser_console_messages", "browser_emulate_media",
                     "browser_resize", "browser_tabs", "browser_close",
                     "browser_take_screenshot", "browser_wait_for",
                     "browser_select_option", "browser_press_key",
