@@ -1038,14 +1038,22 @@ class TestR11BrowseViaJev(unittest.TestCase):
 
     RID = "R11-browse-via-jev"
 
+    # Redirected to `browse` until something opens the session.
     MATCHED = ("browser_navigate", "browser_navigate_back", "browser_click",
-               "browser_type", "browser_fill_form", "browser_press_key",
-               "browser_hover", "browser_drag", "browser_select_option",
-               "browser_snapshot", "browser_take_screenshot", "browser_evaluate",
-               "browser_run_code_unsafe", "browser_wait_for", "browser_find")
-    UNMATCHED = ("browser_close", "browser_install", "browser_resize",
-                 "browser_tabs", "browser_console_messages",
-                 "browser_network_requests")
+               "browser_type", "browser_fill_form", "browser_snapshot",
+               "browser_find")
+    # `browse` cannot express these: never blocked, and they open the session.
+    ALWAYS = ("browser_file_upload", "browser_run_code_unsafe",
+              "browser_evaluate", "browser_handle_dialog", "browser_drag",
+              "browser_drop")
+    # Allowed silently, open nothing.
+    HOUSEKEEPING = ("browser_network_request", "browser_network_requests",
+                    "browser_console_messages", "browser_emulate_media",
+                    "browser_resize", "browser_tabs", "browser_close",
+                    "browser_take_screenshot", "browser_wait_for",
+                    "browser_select_option", "browser_press_key",
+                    "browser_hover")
+    UNMATCHED = ("browser_install",) + HOUSEKEEPING
     PREFIXES = ("mcp__playwright__", "mcp__plugin_playwright_playwright__",
                 "mcp__playwright-ads__", "mcp__playwright-jono__")
 
@@ -1075,7 +1083,25 @@ class TestR11BrowseViaJev(unittest.TestCase):
     def test_the_family_is_exactly_the_documented_one(self):
         self.assertEqual(set(rules._PW_MCP_BROWSING), set(self.MATCHED))
 
-    def test_housekeeping_calls_never_match(self):
+    def test_the_always_allowed_set_is_exactly_the_documented_one(self):
+        self.assertEqual(set(rules._PW_MCP_ALWAYS_ALLOWED), set(self.ALWAYS))
+
+    def test_always_allowed_calls_open_the_session_and_never_deny(self):
+        for prefix in self.PREFIXES:
+            for action in self.ALWAYS:
+                match = rules.prefilter_browser_driving(
+                    self.ctx_mcp(prefix + action, url="https://example.com"))
+                self.assertIsNotNone(match, prefix + action)
+                self.assertTrue(match.extra["open_session"], action)
+                self.assertNotIn("strict", match.extra, action)
+                self.assertNotIn("unlock_on_browse_blocked", match.extra, action)
+
+    def test_the_housekeeping_set_is_exactly_the_documented_one(self):
+        self.assertEqual(set(rules._PW_MCP_HOUSEKEEPING), set(self.HOUSEKEEPING))
+        self.assertFalse(set(rules._PW_MCP_HOUSEKEEPING) & set(rules._PW_MCP_ALWAYS_ALLOWED))
+        self.assertFalse(set(rules._PW_MCP_HOUSEKEEPING) & set(rules._PW_MCP_BROWSING))
+
+    def test_unlisted_calls_never_match(self):
         for prefix in self.PREFIXES:
             for action in self.UNMATCHED:
                 self.assert_silent(self.ctx_mcp(prefix + action), prefix + action)
@@ -1133,7 +1159,9 @@ class TestR11BrowseViaJev(unittest.TestCase):
     def test_the_message_names_the_tool_and_the_only_way_out(self):
         text = rules.R11_SUGGESTION
         for fragment in ("`browse`", 'browse(goal="', 'extract="h1"', "start_url",
-                         "screenshot", "browse/install.sh", "ask the user",
+                         "screenshot", "browse/install.sh",
+                         "File uploads, scripted code",
+                         "signed-in-profile multi-step work go straight to Playwright",
                          '{"R11-browse-via-jev": "off"}'):
             self.assertIn(fragment, text, fragment)
 
@@ -1194,8 +1222,8 @@ class TestR11Enforce(unittest.TestCase):
         self.assertTrue(self.logged[-1]["enforced"])
         self.assertNotIn("answers", self.logged[-1])
 
-    def test_a_housekeeping_call_says_nothing(self):
-        tool = "mcp__plugin_playwright_playwright__browser_close"
+    def test_an_unlisted_call_says_nothing(self):
+        tool = "mcp__plugin_playwright_playwright__browser_install"
         denied, deny, warn = self._run(self._payload(tool=tool))
         self.assertFalse(denied)
         deny.assert_not_called()

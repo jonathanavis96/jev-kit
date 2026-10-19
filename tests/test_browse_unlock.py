@@ -107,15 +107,32 @@ class TestBrowseState(BrowseStateCase):
         browse_state.record_gave_up("s1", "blocked")
         self.assertFalse(browse_state.unlocked("s2"))
 
-    def test_the_row_expires_after_thirty_minutes(self):
+    def test_the_row_outlives_thirty_minutes_but_not_the_backstop(self):
         browse_state.record_gave_up("s1", "blocked")
-        self.assertEqual(browse_state.UNLOCK_WINDOW_S, 1800)
+        self.assertEqual(browse_state.UNLOCK_WINDOW_S, 24 * 3600)
         with mock.patch("time.time", return_value=time.time() + 1801):
+            self.assertTrue(browse_state.unlocked("s1"))
+        with mock.patch("time.time", return_value=time.time() + 24 * 3600 + 1):
             self.assertFalse(browse_state.unlocked("s1"))
+
+    def test_a_playwright_open_row_is_sticky_and_born_announced(self):
+        self.assertTrue(browse_state.record_playwright_open("s1", "browser_file_upload"))
+        row = browse_state.recent_give_up("s1")
+        self.assertEqual(row["status"], "playwright")
+        self.assertTrue(row["announced"])
+        with mock.patch("time.time", return_value=time.time() + 3 * 3600):
+            self.assertTrue(browse_state.unlocked("s1"))
+
+    def test_a_playwright_open_keeps_an_existing_give_up_row(self):
+        browse_state.record_gave_up("s1", "blocked", goal="g")
+        browse_state.record_playwright_open("s1", "browser_evaluate")
+        row = browse_state.recent_give_up("s1")
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["goal"], "g")
 
     def test_expired_rows_are_pruned_on_the_next_write(self):
         browse_state.record_gave_up("old", "blocked")
-        with mock.patch("time.time", return_value=time.time() + 1801):
+        with mock.patch("time.time", return_value=time.time() + 24 * 3600 + 1):
             browse_state.record_gave_up("new", "blocked")
             data = json.loads(browse_state.STATE_FILE.read_text())
         self.assertEqual(list(data), ["new"])
@@ -349,7 +366,7 @@ class TestR11Unlocked(BrowseStateCase):
         self.assertIn("R11-browse-via-jev", text)
         self.assertIn("blocked", text)
         self.assertIn("Photosynthesis to Chlorophyll", text)
-        self.assertIn("30 minutes", text)
+        self.assertIn("rest of this session", text)
         row = self.logged[-1]
         self.assertEqual(row["unlocked_by"], "browse_blocked")
         self.assertEqual(row["browse_status"], "blocked")
@@ -383,13 +400,118 @@ class TestR11Unlocked(BrowseStateCase):
         self.assertIn("errored", warn.call_args[0][0][0])
         self.assertEqual(self.logged[-1]["browse_status"], "error")
 
+    def test_a_record_is_still_open_31_minutes_later(self):
+        browse_state.record_gave_up(self.SESSION, "blocked")
+        with mock.patch("time.time", return_value=time.time() + 31 * 60):
+            denied, deny, _ = self._run(self._payload())
+        self.assertFalse(denied)
+        deny.assert_not_called()
+
     def test_an_expired_record_denies_again(self):
         browse_state.record_gave_up(self.SESSION, "blocked")
-        with mock.patch("time.time", return_value=time.time() + 1801):
+        with mock.patch("time.time", return_value=time.time() + 24 * 3600 + 1):
             denied, deny, _ = self._run(self._payload())
         self.assertTrue(denied)
         deny.assert_called_once()
         self.assertNotIn("unlocked_by", self.logged[-1])
+
+    # --- Playwright calls `browse` cannot express open the session -----------
+
+    PW = "mcp__playwright-jono__"
+
+    def _run_tool(self, action, session_id=None, **ti):
+        tool = self.PW + action
+        payload_obj = {"session_id": session_id or self.SESSION, "cwd": "/tmp",
+                       "tool_name": tool, "tool_input": ti or {"x": 1}}
+        with mock.patch("airlock.client.ask",
+                        side_effect=AssertionError("R11 must never call Jev")), \
+             mock.patch.object(enforce, "emit_deny") as deny, \
+             mock.patch.object(enforce, "emit_warn") as warn:
+            denied = enforce.handle(payload_obj, tool, "enforce")
+        return denied, deny, warn
+
+    def test_upload_is_allowed_cold(self):
+        denied, deny, warn = self._run_tool("browser_file_upload", paths=["/tmp/a"])
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_not_called()
+        self.assertEqual(self.logged[-1]["session_opened_by"], "browser_file_upload")
+
+    def test_run_code_is_allowed_cold(self):
+        denied, deny, warn = self._run_tool("browser_run_code_unsafe", code="x")
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_not_called()
+
+    def test_navigate_is_blocked_cold(self):
+        denied, deny, _ = self._run_tool("browser_navigate", url="https://x")
+        self.assertTrue(denied)
+        deny.assert_called_once()
+
+    def test_navigate_is_allowed_after_run_code_in_the_same_session(self):
+        self._run_tool("browser_run_code_unsafe", code="x")
+        denied, deny, warn = self._run_tool("browser_navigate", url="https://x")
+        self.assertFalse(denied)
+        deny.assert_not_called()
+        warn.assert_not_called()
+        self.assertEqual(self.logged[-1]["unlocked_by"], "playwright_session")
+
+    def test_navigate_is_allowed_31_minutes_after_run_code(self):
+        self._run_tool("browser_run_code_unsafe", code="x")
+        with mock.patch("time.time", return_value=time.time() + 31 * 60):
+            denied, deny, _ = self._run_tool("browser_navigate", url="https://x")
+        self.assertFalse(denied)
+        deny.assert_not_called()
+
+    def test_file_upload_then_navigate_is_allowed(self):
+        self._run_tool("browser_file_upload", paths=["/tmp/a"])
+        denied, deny, _ = self._run_tool("browser_navigate", url="https://x")
+        self.assertFalse(denied)
+        deny.assert_not_called()
+
+    def test_housekeeping_is_allowed_cold_but_navigate_stays_blocked(self):
+        for action in ("browser_tabs", "browser_close", "browser_resize",
+                       "browser_console_messages", "browser_take_screenshot",
+                       "browser_wait_for", "browser_press_key", "browser_hover",
+                       "browser_select_option", "browser_emulate_media"):
+            denied, deny, warn = self._run_tool(action)
+            self.assertFalse(denied, action)
+            deny.assert_not_called()
+            warn.assert_not_called()
+            self.assertIsNone(browse_state.recent_give_up(self.SESSION), action)
+        denied, deny, _ = self._run_tool("browser_navigate", url="https://x")
+        self.assertTrue(denied)
+        deny.assert_called_once()
+
+    def test_another_session_is_not_opened_by_run_code(self):
+        self._run_tool("browser_run_code_unsafe", code="x")
+        denied, deny, _ = self._run_tool("browser_navigate", session_id="other",
+                                         url="https://x")
+        self.assertTrue(denied)
+        deny.assert_called_once()
+
+    def test_navigate_after_browse_failure_still_warns_once(self):
+        browse_state.record_gave_up(self.SESSION, "error")
+        denied, _, warn = self._run_tool("browser_navigate", url="https://x")
+        self.assertFalse(denied)
+        warn.assert_called_once()
+
+    def test_the_off_switch_still_works(self):
+        with mock.patch("airlock.rules.load_action_overrides",
+                        return_value={"R11-browse-via-jev": "off"}):
+            denied, deny, warn = self._run_tool("browser_navigate", url="https://x")
+        self.assertFalse(denied)
+        deny.assert_not_called()
+
+    def test_a_warn_switch_warns_cold_navigate_and_stays_quiet_for_upload(self):
+        with mock.patch("airlock.rules.load_action_overrides",
+                        return_value={"R11-browse-via-jev": "warn"}):
+            denied, deny, warn = self._run_tool("browser_navigate", url="https://x")
+            self.assertFalse(denied)
+            warn.assert_called_once()
+            denied, deny, warn = self._run_tool("browser_file_upload", paths=["/a"])
+            self.assertFalse(denied)
+            warn.assert_not_called()
 
     def test_a_different_session_is_not_unlocked(self):
         browse_state.record_gave_up("somebody-else", "blocked")

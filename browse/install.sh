@@ -71,7 +71,9 @@ PY_ABS="$(command -v "$PY")"
 cat <<NOTE
 
 Add this under "mcpServers" in ~/.claude.json (nothing here edits that file).
-Your Playwright MCP entries stay exactly as they are.
+Your Playwright MCP entries stay exactly as they are. Use browse for reading and
+simple click-through; Playwright stays the tool for file uploads, scripted code
+and multi-step work in a signed-in profile.
 
 NOTE
 "$PY_ABS" - "$SERVER" <<'PYEOF'

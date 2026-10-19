@@ -20,7 +20,7 @@ request, no log row, no subprocess.
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |
 | `R10-general-risk` | Bash | **warn only, never deny** | code pre-filter, then a Jev Score + `user_requested` | the catch-all: a call no other rule covers that plainly reaches outside the working tree |
-| `R11-browse-via-jev` | every tool (only `mcp__` names can match) | deny | code only | a Playwright MCP browsing call, when the kit ships a Jev-decided `browse` tool |
+| `R11-browse-via-jev` | every tool (only `mcp__` names can match) | deny | code only | a session's first plain Playwright MCP read/navigate/click call, when the kit ships a Jev-decided `browse` tool. Calls `browse` cannot express (upload, scripted code, ...) are always allowed |
 
 `R8-tool-choice-guard`'s graphify-suggestion branch only exists when the search
 root carries a graph (`graphify-out/graph.json`). With no graph the branch is
@@ -35,10 +35,11 @@ over the runner-up.
 
 `R11-browse-via-jev` is the exception, and the only one. It ignores the stamp
 and the loop allowance both, for the reason its own section below gives. The
-budget and the fail-open still apply to it. It has one door, and only the
-`browse` tool itself opens it: a `browse` call that comes back `blocked`, or
-errors, turns this rule into a warn for the next thirty minutes of that
-session.
+budget and the fail-open still apply to it. Two things open it for the rest
+of the session. One is a `browse` call that comes back `blocked` or errors,
+after which the rule warns. The other is any Playwright call `browse` cannot
+express, such as a file upload or scripted code: it is always allowed, and the
+rule then stands aside.
 
 A deny is also softened to a warn when the user's own recent words asked for the
 thing. That check reads only what the person typed, never a tool result or a
@@ -174,17 +175,30 @@ MCP call reaches the table with its name, and the name is all this needs.
 - **The server** is any MCP server whose name contains `playwright`. That
   covers `mcp__playwright__`, `mcp__plugin_playwright_playwright__`,
   `mcp__playwright-ads__` and `mcp__playwright-jono__`.
-- **The tool** is one of fifteen that drive or read a page:
-  `browser_navigate`, `browser_navigate_back`, `browser_click`,
-  `browser_type`, `browser_fill_form`, `browser_press_key`, `browser_hover`,
-  `browser_drag`, `browser_select_option`, `browser_snapshot`,
-  `browser_take_screenshot`, `browser_evaluate`, `browser_run_code_unsafe`,
-  `browser_wait_for` and `browser_find`.
-- **Housekeeping never matches**: `browser_close`, `browser_install`,
-  `browser_resize`, `browser_tabs`, `browser_console_messages` and
-  `browser_network_requests`.
+- **Redirected to `browse`** are the seven plain read/navigate/click/type
+  calls `browse` can do: `browser_navigate`, `browser_navigate_back`,
+  `browser_click`, `browser_type`, `browser_fill_form`, `browser_snapshot` and
+  `browser_find`. Only while nothing has opened the session (see below).
+- **Always allowed, and they open the session**: the Playwright tools `browse`
+  genuinely cannot express: `browser_file_upload`, `browser_run_code_unsafe`,
+  `browser_evaluate`, `browser_handle_dialog`, `browser_drag` and
+  `browser_drop`. They are never blocked and never
+  warned, and the first one opens Playwright for the **rest of the session**
+  (the match carries `open_session`; `airlock/enforce.py` writes the row
+  through `browse_state.record_playwright_open`). Incident that motivated it
+  (2026-10-19): an explicitly requested Google Drive upload through a
+  signed-in Playwright profile needed a throwaway failing `browse` call to
+  open a 30-minute window, which closed mid-task.
+- **Housekeeping is allowed silently but opens nothing**: `browser_tabs`,
+  `browser_close`, `browser_resize`, `browser_console_messages`,
+  `browser_take_screenshot`, `browser_wait_for`, `browser_press_key`,
+  `browser_hover`, `browser_select_option`, `browser_emulate_media` and
+  `browser_network_request(s)` (passive, and callable on a blank page). They
+  write no row, so calling one first does not unlock plain navigation: a cold
+  `browser_navigate` after `browser_tabs` is still redirected to `browse`.
+- `browser_install` and anything unlisted never match.
 
-Matched means deny. Jev is not asked anything, so there is no confidence bar
+A redirected call with nothing opening the session means deny. Jev is not asked anything, so there is no confidence bar
 and no key is needed. The `user_requested` question that can soften other
 denies is skipped here too. An MCP browser call made from a Claude session is
 browsing by definition, which leaves nothing to judge.
@@ -229,7 +243,8 @@ a two-hop Wikipedia link-navigation task. A strict rule on top of that
 leaves the session with no browser at all, which is a worse outcome than the
 spend it was avoiding.
 
-So `browse` failing is what opens the door, and nothing else does.
+So the door is opened by `browse` failing, or by the session making any
+always-allowed Playwright call above. Nothing else opens it.
 
 - A **PostToolUse and PostToolUseFailure hook**,
   `hooks/airlock_browse_unlock.py`, is registered against the one tool name
@@ -241,11 +256,17 @@ So `browse` failing is what opens the door, and nothing else does.
   parse writes nothing either, and it never prints a word or blocks anything.
 - The row lives in `~/.local/state/airlock/browse_unlock.json`, handled by
   `airlock/browse_state.py`. Same lock, same 700/600 permissions and the same
-  `platform_compat` calls as the loop-protection file beside it. It expires
-  after **thirty minutes**, and every write prunes what has expired.
-- While a row is unexpired, R11 warns instead of denying. The log row carries
-  `unlocked_by: "browse_blocked"` and `browse_status`, so a warn earned this
-  way is never confused with the rule simply not firing.
+  `platform_compat` calls as the loop-protection file beside it. A row lasts
+  for the **rest of the session**: `UNLOCK_WINDOW_S` is 24 hours, only a
+  backstop because Claude Code sends no session-end event. It used to be 30
+  minutes, which cut multi-step Playwright tasks off halfway. Every write
+  prunes what has expired.
+- While a row is unexpired, R11 does not deny. After a `browse` failure it
+  warns once, and the log row carries `unlocked_by: "browse_blocked"` and
+  `browse_status`. After an always-allowed Playwright call it allows silently
+  and the log row carries `unlocked_by: "playwright_session"`; the opening call
+  itself logs `session_opened_by`. Neither is confused with the rule simply
+  not firing.
 - Anything that goes wrong reading the file means no unlock. The rule stays
   strict, which is the failure direction that cannot be abused.
 
@@ -259,9 +280,9 @@ and its siblings. That is accepted rather than worked around. The id in the
 payload is the only handle a hook gets, and `browse` giving up says something
 about the task, not about which agent asked.
 
-An agent that genuinely needs Playwright for something `browse` cannot express
-at all, for per-frame timing, raw CDP or a scripted measurement, stops and
-asks. Turning the rule off is the user's call, and they make it by putting
+An agent that needs Playwright for something `browse` cannot express (a file
+upload, scripted code, per-frame timing, raw CDP) just calls it: those tools
+are always allowed. Turning the rule off is the user's call, and they make it by putting
 `{"R11-browse-via-jev": "off"}` in `~/.config/airlock/rules.json`.
 
 This is a cost steer, not a security control. It removes nothing: the

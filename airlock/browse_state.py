@@ -1,4 +1,5 @@
-"""Per-session record that the kit's `browse` tool gave up on a goal.
+"""Per-session record that Playwright MCP is open: `browse` gave up on a goal,
+or the session made a Playwright call `browse` cannot express at all.
 
 R11 is strict (see airlock/rules.py, prefilter_browser_driving): a stamp does
 not lift it and repeating the call does not either. That is right while
@@ -12,7 +13,7 @@ So `browse` giving up is the one thing that opens the door. A PostToolUse hook
 (hooks/airlock_browse_unlock.py) writes a row here when a `browse` call comes
 back `blocked`, or when the call itself errored, and R11 reads it: an
 unexpired row for this session turns the deny into a warn. Nothing else does.
-Thirty minutes, then the door closes again.
+The door then stays open for the rest of the session (UNLOCK_WINDOW_S).
 
 State lives beside the loop-protection file, at
 ~/.local/state/airlock/browse_unlock.json (%LOCALAPPDATA%\\airlock\\state\\
@@ -43,10 +44,17 @@ from . import state
 STATE_DIR = paths.state_dir()
 STATE_FILE = STATE_DIR / "browse_unlock.json"
 
-# How long one `browse` failure keeps Playwright MCP open. Thirty minutes is
-# long enough to finish the task that needed it and short enough that the next
-# unrelated piece of browsing starts at `browse` again.
-UNLOCK_WINDOW_S = 1800
+# How long a row keeps Playwright MCP open: the rest of the session. Claude
+# Code gives a hook no "session ended" event, so a day is the backstop that
+# lets pruning reclaim old rows. It used to be thirty minutes, which cut a
+# multi-step Playwright task off halfway (a signed-in Google Drive upload, with
+# `browse` unable to do any of it, hit the wall mid-task). The window is long
+# on purpose: once Playwright is the right tool for a session, it stays so.
+UNLOCK_WINDOW_S = 24 * 3600
+
+# The row status written when Playwright was opened by a call `browse` cannot
+# express (see record_playwright_open), as opposed to GAVE_UP_STATUSES.
+PLAYWRIGHT_STATUS = "playwright"
 
 # The statuses worth recording. `done` is `browse` succeeding, so it records
 # nothing. "error" is this module's own name for a call that failed outright
@@ -106,6 +114,40 @@ def record_gave_up(session_id, status, goal=None, url=None):
         if url:
             row["url"] = str(url)[:_GOAL_LIMIT]
         data[session_id or ""] = row
+        state.save(fd, data)
+    except Exception:
+        return False
+    finally:
+        state.close(fd)
+    return True
+
+
+def record_playwright_open(session_id, action=None):
+    """Record that this session made a Playwright call `browse` cannot express
+    (upload, scripted code, evaluate, ...), which opens Playwright for the rest
+    of the session. Never raises.
+
+    An existing unexpired row (a `browse` give-up) is kept as it is and only
+    refreshed, so its status and `announced` flag survive. A new row is born
+    `announced`: nobody needs telling about a door they opened themselves.
+    """
+    try:
+        fd = _open_locked(platform_compat.LOCK_EXCLUSIVE)
+    except Exception:
+        return False
+    try:
+        data = state.load(fd)
+        now = time.time()
+        data = _prune(data, now)
+        key = session_id or ""
+        row = data.get(key)
+        if isinstance(row, dict):
+            row["ts"] = now
+        else:
+            row = {"ts": now, "status": PLAYWRIGHT_STATUS, "announced": True}
+            if action:
+                row["goal"] = str(action)[:_GOAL_LIMIT]
+            data[key] = row
         state.save(fd, data)
     except Exception:
         return False

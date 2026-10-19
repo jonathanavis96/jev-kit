@@ -308,7 +308,7 @@ def _rule_warn_text(rule_id, detail, suggestion):
 def _browse_unlock_warn_text(rule_id, detail, row):
     """R11 standing aside because `browse` already gave up in this session.
 
-    Says WHICH failure opened the door and how long it stays open, so the
+    Says WHICH failure opened the door and that it stays open, so the
     session can tell this apart from the rule simply not firing."""
     row = row or {}
     how = ("`browse` came back blocked" if row.get("status") == "blocked"
@@ -319,7 +319,7 @@ def _browse_unlock_warn_text(rule_id, detail, row):
         line += " on: %s" % (goal if len(goal) <= 120 else goal[:117] + "...")
     return (
         "airlock %s: %s\n"
-        "%s, so Playwright MCP is allowed for 30 minutes from then. Nothing "
+        "%s, so Playwright MCP is allowed for the rest of this session. Nothing "
         "was blocked and this call ran as you wrote it.\n"
         "Go back to `browse` for the next piece of browsing: this door is "
         "open because that one failed, not because Playwright is the default "
@@ -471,6 +471,23 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         "input_summary": _log_input_summary(ctx),
     })
 
+    # A Playwright call `browse` cannot express (upload, scripted code, ...):
+    # never blocked, never warned. It opens Playwright for the rest of the
+    # session, so a multi-step task is not cut off when a plain navigate or
+    # click comes next. See airlock/rules.py, prefilter_browser_driving.
+    if match.extra.get("open_session"):
+        try:
+            from . import browse_state
+            browse_state.record_playwright_open(session_id, match.extra.get("action"))
+        except Exception:
+            pass
+        entry["fires"] = False
+        entry["action"] = "allow"
+        entry["enforced"] = False
+        entry["session_opened_by"] = match.extra.get("action")
+        log.append(entry)
+        return False
+
     if eff == "deny" and match.extra.get("downgrade_to") in ("warn", "log"):
         eff = match.extra["downgrade_to"]
         entry["action"] = eff
@@ -560,6 +577,14 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
             row = browse_state.recent_give_up(session_id)
         except Exception:
             row = None
+        if row is not None and row.get("status") == "playwright":
+            # Opened by a Playwright call `browse` cannot express: allowed
+            # silently, nothing to announce.
+            entry["unlocked_by"] = "playwright_session"
+            entry["action"] = "allow"
+            entry["enforced"] = False
+            log.append(entry)
+            return False
         if row is not None:
             entry["unlocked_by"] = "browse_blocked"
             entry["browse_status"] = row.get("status")
