@@ -24,7 +24,7 @@ in one session, an empty state file, and R11 still denying).
 
 When a call comes back `blocked`, or the call itself errored, it writes a small per-session row through
 airlock/browse_state.py, and R11 turns from a deny into a warn for the next
-thirty minutes of that session. Nothing else opens that door: with no row,
+rest of that session. Nothing else opens that door: with no row,
 stamps and repeats still do nothing.
 
 WHAT IT PROMISES

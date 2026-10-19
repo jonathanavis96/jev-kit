@@ -2119,8 +2119,8 @@ def general_risk_suppression(answers):
 # Playwright MCP servers stay registered.
 
 R11_SUGGESTION = (
-    "Browsing goes through the kit's `browse` MCP tool, not Playwright MCP. "
-    "Jev chooses each step, so it is faster and the Claude bill for the "
+    "Plain browsing goes through the kit's `browse` MCP tool, not Playwright "
+    "MCP. Jev chooses each step, so it is faster and the Claude bill for the "
     "decision loop is close to zero.\n"
     '  browse(goal="open https://example.com and report the main heading", '
     'extract="h1")\n'
@@ -2137,26 +2137,43 @@ R11_SUGGESTION = (
     "low effort by default or plan_model=\"haiku\", names each step and Jev "
     "executes it. It is slower and billed to the user's claude login, so plain "
     "`browse` stays the choice for spelled-out steps.\n"
+    "File uploads, scripted code (browser_run_code_unsafe, browser_evaluate), "
+    "and signed-in-profile multi-step work go straight to Playwright: those "
+    "calls are never blocked, and the first one opens Playwright for the rest "
+    "of the session.\n"
     "If `browse` comes back `blocked`, or the call errors, Playwright MCP is "
-    "yours for the next 30 minutes of this session -- this rule warns instead "
-    "of blocking, automatically, no stamp needed. Try `browse` first and that "
-    "door opens by itself.\n"
+    "yours for the rest of this session as well -- this rule warns instead "
+    "of blocking, automatically, no stamp needed.\n"
     "A stamp does not lift this rule and repeating the call does not either. "
-    "For anything `browse` cannot express at all -- per-frame timing, CDP, a "
-    "scripted measurement -- stop and ask the user, saying which of those it "
-    'is. Only they turn the rule off, with {"R11-browse-via-jev": "off"} in '
-    "~/.config/airlock/rules.json."
+    "Only the user turns the rule off, with "
+    '{"R11-browse-via-jev": "off"} in ~/.config/airlock/rules.json.'
 )
 
-# Driving or reading a page. Housekeeping is deliberately absent and never
-# matches: browser_close, browser_install, browser_resize, browser_tabs,
-# browser_console_messages, browser_network_requests.
+# Plain driving or reading of a page: the calls `browse` can do, and the only
+# ones this rule redirects (and only while nothing has opened the session).
 _PW_MCP_BROWSING = frozenset((
     "browser_navigate", "browser_navigate_back", "browser_click",
-    "browser_type", "browser_fill_form", "browser_press_key", "browser_hover",
-    "browser_drag", "browser_select_option", "browser_snapshot",
-    "browser_take_screenshot", "browser_evaluate", "browser_run_code_unsafe",
-    "browser_wait_for", "browser_find",
+    "browser_type", "browser_fill_form", "browser_snapshot", "browser_find",
+))
+
+# Playwright tools `browse` genuinely cannot express. Never blocked, never
+# warned, and the first one in a session opens Playwright for the rest of it
+# (the match carries `open_session`; airlock/enforce.py records it through
+# airlock/browse_state.py).
+_PW_MCP_ALWAYS_ALLOWED = frozenset((
+    "browser_file_upload", "browser_run_code_unsafe", "browser_evaluate",
+    "browser_handle_dialog", "browser_drag", "browser_drop",
+    "browser_network_request", "browser_network_requests",
+))
+
+# Housekeeping and page-interaction helpers: allowed silently, but they do NOT
+# open the session. Letting them would let an agent call browser_tabs once and
+# then navigate freely, defeating the redirect. They write no row.
+_PW_MCP_HOUSEKEEPING = frozenset((
+    "browser_console_messages", "browser_emulate_media", "browser_resize",
+    "browser_tabs", "browser_close", "browser_take_screenshot",
+    "browser_wait_for", "browser_select_option", "browser_press_key",
+    "browser_hover",
 ))
 
 
@@ -2178,8 +2195,18 @@ def _pw_mcp_action(tool_name):
 
 def prefilter_browser_driving(ctx):
     action = _pw_mcp_action(ctx["tool_name"] or "")
+    if action in _PW_MCP_ALWAYS_ALLOWED:
+        # `browse` cannot do this, so there is nothing to steer towards. The
+        # match exists only so enforce can open the session: from here on a
+        # plain navigate or click is allowed too, for the rest of the session.
+        return Match(
+            "Playwright MCP `%s`: not expressible in `browse`" % action,
+            "",
+            extra={"how": "playwright mcp tool %s" % action, "no_soften": True,
+                   "open_session": True, "action": action},
+        )
     if action not in _PW_MCP_BROWSING:
-        return None
+        return None  # includes _PW_MCP_HOUSEKEEPING: allowed, opens nothing
     # ask=False: the code decided. `no_soften` keeps the `user_requested`
     # question out of it as well, so nothing about this rule ever calls Jev.
     #
@@ -2188,20 +2215,14 @@ def prefilter_browser_driving(ctx):
     # to make a judgement call: a subagent stamped `[airlock-ok: ...]` into the
     # `element` field of a click, and, failing that, sent the identical call
     # twice to ride the loop allowance. Neither is a human saying so, which is
-    # what those escapes exist to carry. R11 is a cost steer with a first-class
-    # alternative in the same session, so the honest answer to "I really need
-    # Playwright" is to ask the person, not to slip one call through.
-    # `airlock/enforce.py` is where `strict` is honoured.
+    # what those escapes exist to carry.
     #
-    # `unlock_on_browse_blocked` is the one door, and `browse` itself is what
-    # opens it. When a `browse` call in this session came back `blocked`, or
-    # errored, a PostToolUse hook (hooks/airlock_browse_unlock.py) wrote a row
-    # through airlock/browse_state.py and this deny becomes a warn for the
-    # next thirty minutes. The alternative is only first-class while it works,
-    # and Jev's one-step chooser cannot plan a multi-hop task; measured, it
-    # gave up on a two-hop Wikipedia link-navigation task. A strict rule on
-    # top of that leaves a session with no browser at all. The session_id is
-    # not visible here, so `airlock/enforce.py` does the lookup.
+    # `unlock_on_browse_blocked` is the one door: when `browse` gave up in
+    # this session, or an always-allowed Playwright call already opened it
+    # (hooks/airlock_browse_unlock.py and enforce.py write the row through
+    # airlock/browse_state.py), this deny becomes a warn / silent allow for
+    # the rest of the session. The session_id is not visible here, so
+    # `airlock/enforce.py` does the lookup.
     return Match(
         "Playwright MCP `%s`: use the `browse` tool instead" % action,
         R11_SUGGESTION,
