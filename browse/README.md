@@ -200,9 +200,10 @@ link to Y, scroll if the link is not in view" is the shape that works.
 When it is beyond `browse` anyway, airlock notices. A PostToolUse hook,
 `hooks/airlock_browse_unlock.py`, records a `blocked` result and an errored
 call alike, and `R11-browse-via-jev` then warns instead of denying Playwright
-MCP for the rest of that session. There is nothing to do by hand. Use `browse`
-for reading, navigating and simple click-through; file uploads, scripted code,
-dialogs and multi-step work in a signed-in profile go straight to Playwright
+MCP for the rest of that session. There is nothing to do by hand.
+
+Use `browse` for reading, navigating and simple click-through. File uploads,
+scripted code, dialogs and signed-in multi-step work go straight to Playwright
 MCP, which airlock never blocks for those calls.
 [docs/rules.md](../docs/rules.md#when-browse-gives-up-r11-stands-aside) has
 the detail, including what a subagent shares with its parent.

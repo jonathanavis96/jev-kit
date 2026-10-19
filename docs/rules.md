@@ -36,9 +36,10 @@ over the runner-up.
 `R11-browse-via-jev` is the exception, and the only one. It ignores the stamp
 and the loop allowance both, for the reason its own section below gives. The
 budget and the fail-open still apply to it. Two things open it for the rest
-of the session: a `browse` call that comes back `blocked` or errors (the rule
-then warns), and any Playwright call `browse` cannot express, such as a file
-upload or scripted code (always allowed, and the rule then stands aside).
+of the session. One is a `browse` call that comes back `blocked` or errors,
+after which the rule warns. The other is any Playwright call `browse` cannot
+express, such as a file upload or scripted code: it is always allowed, and the
+rule then stands aside.
 
 A deny is also softened to a warn when the user's own recent words asked for the
 thing. That check reads only what the person typed, never a tool result or a

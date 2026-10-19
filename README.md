@@ -192,12 +192,16 @@ A session reaches it through one MCP tool, `browse`, which
 the final URL, the page text and whatever a CSS selector picked out.
 
 The guard points at that tool. `R11-browse-via-jev` matches a Playwright MCP
-plain read/navigate/click call by its tool name and, as a session's first
-browser call, denies it with the one-line usage of `browse`. Playwright tools
-`browse` cannot express (file uploads, scripted code, dialogs, drag, network,
-and the like) are always allowed, and the first one opens Playwright for the
-rest of the session. The match is code only: Jev is never asked and nothing is scored.
-Shell commands and Playwright scripts are never looked at, and the Playwright
+plain read/navigate/click call by its tool name. As a session's first browser
+call, it is denied with the one-line usage of `browse`.
+
+Playwright tools `browse` cannot express (file uploads, scripted code,
+dialogs, drag and drop) are always allowed. The first one opens Playwright for
+the rest of the session. Housekeeping calls such as tabs, screenshots and
+network inspection are allowed too, but open nothing.
+
+The match is code only: Jev is never asked and nothing is scored. Shell
+commands and Playwright scripts are never looked at, and the Playwright
 servers stay registered. See
 [docs/rules.md](docs/rules.md#r11-browse-via-jev-a-playwright-mcp-call-is-pointed-at-browse).
 
@@ -414,13 +418,13 @@ Loop protection also means the same call is never denied twice in ten minutes,
 so a retry gets through on its own.
 
 `R11-browse-via-jev` is the exception to the first and the last of those. A
-stamp on it is logged and refused, and a repeat is denied again. Use `browse`
-for reading, navigating and simple click-through; use Playwright directly for
-file uploads, scripted code, dialogs and multi-step work in a signed-in
-profile (those calls are never blocked and open Playwright for the rest of the
-session). If `browse` comes back `blocked` or errors, Playwright is yours for
-the rest of the session too, with no stamp needed. Past that, ask the person
-to switch the rule off.
+stamp on it is logged and refused, and a repeat is denied again.
+
+Use `browse` for reading, navigating and simple click-through. Uploads,
+scripted code, dialogs and signed-in multi-step work go straight to
+Playwright: those calls are never blocked, and the first one opens Playwright
+for the rest of the session. A `browse` call that comes back `blocked` or errors does the
+same, with no stamp needed. Past that, ask the person to switch the rule off.
 
 </details>
 
