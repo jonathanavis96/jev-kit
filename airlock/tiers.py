@@ -58,6 +58,12 @@ DIRECTOR_PREFIXES = ("feature-dev:", "code-simplifier:")
 # expensive as the director dispatching it directly.
 _UNKNOWN_RUNG_FROM_TOP = 2
 
+# What each `model` value of the Agent tool costs, as a name on the built-in
+# ladder. A machine ladder may lead that rung with another name, so it is found
+# by membership. A machine ladder that lists the model name in a rung wins, and
+# a ladder with neither leaves the dispatch judged by its type.
+MODEL_RUNGS = {"haiku": "scout", "sonnet": "workerS", "opus": "workerO", "fable": "fable"}
+
 _CACHE = {}
 
 
@@ -125,6 +131,31 @@ def rung_for_agent_type(subagent_type, path=None):
             return rung[0]
     # A DIRECTOR_PREFIXES name lands here too: it IS the Opus-level rung.
     return rungs[max(0, len(rungs) - _UNKNOWN_RUNG_FROM_TOP)][0]
+
+
+def rung_for_model(model, path=None):
+    """The rung an Agent `model` value stands for, or None. Takes an alias
+    (`sonnet`) or a full model id, and None means nothing here knows it."""
+    name = str(model or "").strip().lower()
+    if not name:
+        return None
+    rungs = ladder(path)
+    for rung in rungs:
+        if name in rung:
+            return rung[0]
+    for family, member in MODEL_RUNGS.items():
+        if family in name:
+            for rung in rungs:
+                if member in rung:
+                    return rung[0]
+    return None
+
+
+def effective_type(subagent_type, model, path=None):
+    """The ladder name to judge a dispatch by. `model` decides what the
+    dispatch costs when it is set (issue #39): one role agent can run on any
+    model, so its type says nothing then."""
+    return rung_for_model(model, path) or subagent_type
 
 
 def dispatch_name_for_rung(rung_name, path=None):

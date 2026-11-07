@@ -156,9 +156,12 @@ def _parse_ts(ts):
     if not ts:
         return None
     try:
-        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        t = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
     except Exception:
         return None
+    # Every writer logs UTC. A naive stamp compared with the aware cutoff raises
+    # TypeError, and one such row would take the whole summary down.
+    return t if t.tzinfo else t.replace(tzinfo=datetime.timezone.utc)
 
 
 def _percentile(values, pct):

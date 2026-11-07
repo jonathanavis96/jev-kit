@@ -44,6 +44,7 @@ def compute_tier_entry(data, timeout_s=None):
     ti = data.get("tool_input") or {}
     subagent_type = str(ti.get("subagent_type") or "")
     model_override = str(ti.get("model") or "")
+    judged_type = tiers.effective_type(subagent_type, model_override)
     description = redact.redact(str(ti.get("description") or ""))
     prompt = redact.redact_and_truncate_prompt(str(ti.get("prompt") or ""))
 
@@ -66,7 +67,7 @@ def compute_tier_entry(data, timeout_s=None):
     }
 
     sampled = False
-    if not policy.deny_possible_agent(subagent_type):
+    if not policy.deny_possible_agent(judged_type):
         sampled = random.random() < policy.sample_rate()
         if not sampled:
             entry = dict(entry_base)
@@ -118,11 +119,11 @@ def compute_tier_entry(data, timeout_s=None):
         task_kind_confidence=task_kind_conf,
         task_kind_margin=task_kind_margin,
         states_prior_failed_attempts=prior_failed,
-        chosen_type=subagent_type,
+        chosen_type=judged_type,
     )
     entry.update(policy.tier_entry_fields(
         verdict, task_kind, task_kind_conf, task_kind_margin,
-        prior_failed, subagent_type))
+        prior_failed, judged_type, chosen_model=model_override))
     # A sampled shadow row must never look like a deny, whatever the verdict.
     entry["would_deny"] = verdict["would_deny"] and not sampled
     entry["chosen"] = subagent_type

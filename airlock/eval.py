@@ -36,7 +36,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import client, policy, questions
+from . import client, policy, questions, tiers
 from . import rules as rules_mod
 from . import scope as scope_mod
 
@@ -101,6 +101,7 @@ def _judge_tier(payload):
     ti = payload.get("tool_input") or {}
     subagent_type = str(ti.get("subagent_type") or "")
     model_override = str(ti.get("model") or "")
+    judged_type = tiers.effective_type(subagent_type, model_override)
     description = str(ti.get("description") or "")
     prompt = str(ti.get("prompt") or "")
 
@@ -120,16 +121,16 @@ def _judge_tier(payload):
         task_kind_confidence=confidence,
         task_kind_margin=margin,
         states_prior_failed_attempts=prior_failed,
-        chosen_type=subagent_type,
+        chosen_type=judged_type,
     )
     entry = policy.tier_entry_fields(verdict, task_kind, confidence, margin,
-                                     prior_failed, subagent_type)
+                                     prior_failed, judged_type, chosen_model=model_override)
     usage = response.get("usage") or {}
     tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
     return {
         "predicted_label": task_kind,
         "predicted_would_deny": verdict["would_deny"],
-        "predicted_outcome": tier_outcome(subagent_type, entry),
+        "predicted_outcome": tier_outcome(judged_type, entry),
         "rung_diff": verdict.get("rung_diff"),
         "confidence": confidence,
         "margin": margin,

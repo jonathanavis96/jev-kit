@@ -48,6 +48,7 @@ webfetch-guard.py for WebFetch prompt rewriting).
 import json
 import os
 import re
+import shlex
 
 from . import keyfile, paths, scope
 from .headless import cpu_count, is_small_host
@@ -136,30 +137,227 @@ def strip_heredocs(command):
     rule. Seen live on 2026-09-19: a note containing the word for the
     privilege-elevation command was blocked as if it were that command.
     The one implementation is airlock/scope.py's, which knows quoting and
-    here-strings. Never raises; on anything odd it returns the input
+    here-strings. These rules stop commands, so a body with no terminator
+    stays in view. Never raises; on anything odd it returns the input
     unchanged."""
     try:
-        return scope.strip_heredocs(command)
+        return scope.strip_heredocs(command, keep_unterminated=True)
     except Exception:
         return command
+
+
+def _ansi_string_end(s, i):
+    """Index just past the `$'...'` string at `i`, where a backslash escapes the
+    next character, unlike in plain single quotes."""
+    i += 2
+    n = len(s)
+    while i < n:
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s[i] == "'":
+            return i + 1
+        i += 1
+    return n
+
+
+def _shell_nesting(s, start=0, one_construct=False):
+    """(comment offsets, end) of shell text, walked with its nesting.
+
+    A `#` opens a comment only at the start of a word in plain code. It is text
+    inside `${...}`, `$((...))`, `$[...]`, `((...))`, `[[ ... ]]`, quotes and
+    backticks, and `$(a)#b` is one word, so the commands after each of those
+    would vanish if it were read as a comment. `$(...)` and `(...)` are plain
+    code again, whatever surrounds them.
+
+    With `one_construct`, stops where the construct at `start` closes, and `end`
+    is the offset just past it. The walk never goes backwards, and the stack
+    replaces recursion, so hostile nesting costs one pass.
+
+    When the text ends with a construct open, or when a `case` inside a
+    substitution makes a `)` mean two things, no further comment is reported:
+    missing a comment only keeps its words in view."""
+    comments = set()
+    stack = []
+    i = start
+    n = len(s)
+    word_start = True
+    give_up = False
+    doubles = 0  # open `"` on the stack
+    while i < n:
+        ch = s[i]
+        top = stack[-1] if stack else None
+        if top == "`":
+            if ch == "\\":
+                i += 2
+                continue
+            i += 1
+            if ch == "`":
+                stack.pop()
+                if one_construct and not stack:
+                    return comments, i
+            continue
+        if ch == "\\":
+            i += 2
+            word_start = False
+            continue
+        opened = None
+        if ch == "`":
+            opened, width = "`", 1
+        elif s.startswith("$((", i):
+            opened, width = "a", 3
+        elif s.startswith("$(", i):
+            opened, width = "$", 2
+        elif s.startswith("${", i):
+            opened, width = "{", 2
+        elif s.startswith("$[", i):
+            opened, width = "b", 2
+        if opened:
+            stack.append(opened)
+            i += width
+            word_start = opened == "$"
+            continue
+        if top == '"':
+            i += 1
+            if ch == '"':
+                stack.pop()
+                doubles -= 1
+                word_start = False
+            continue
+        if ch == '"':
+            stack.append('"')
+            doubles += 1
+            i += 1
+            word_start = False
+            continue
+        if ch == "'" or s.startswith("$'", i):
+            # In `"${x:-it's}"` the double quotes make an apostrophe plain text.
+            if not (top == "{" and doubles and ch == "'"):
+                if ch == "'":
+                    end = s.find("'", i + 1)
+                    i = n if end == -1 else end + 1
+                else:
+                    i = _ansi_string_end(s, i)
+                word_start = False
+                continue
+        closed = None
+        if top == "{":
+            closed = ch == "}"
+        elif top == "b":
+            closed = ch == "]"
+        elif top == "p":
+            closed = ch == ")"
+            if ch == "(":
+                stack.append("p")
+        elif top == "a":
+            if s.startswith("))", i):
+                stack.pop()
+                i += 2
+                word_start = False
+                if one_construct and not stack:
+                    return comments, i
+                continue
+            if ch == ")":
+                stack[-1] = "$"  # `$((a) b)` is a subshell in a substitution
+            elif ch == "(":
+                stack.append("p")
+        elif top == "[":
+            if s.startswith("]]", i):
+                stack.pop()
+                i += 2
+                word_start = False
+                continue
+        else:
+            if ch == "#" and word_start and not give_up:
+                comments.add(i)
+                newline = s.find("\n", i)
+                i = n if newline == -1 else newline
+                continue
+            if word_start and s.startswith("[[", i):
+                stack.append("[")
+                i += 2
+                continue
+            if word_start and top and s.startswith("case", i) and s[i + 4:i + 5].isspace():
+                give_up = True
+            if ch == "(":
+                if s.startswith("((", i) and word_start:
+                    stack.append("a")
+                    i += 2
+                    word_start = False
+                    continue
+                stack.append("$" if i > 0 and s[i - 1] in "<>" else "(")
+                i += 1
+                word_start = True
+                continue
+            if ch == ")":
+                popped = stack.pop() if top else "("
+                i += 1
+                word_start = popped == "("
+                if one_construct and not stack:
+                    return comments, i
+                continue
+            word_start = ch in scope.COMMENT_AFTER
+            i += 1
+            continue
+        i += 1
+        word_start = False
+        if closed:
+            stack.pop()
+            if one_construct and not stack:
+                return comments, i
+    return comments, n
+
+
+def _comment_starts(command):
+    """Offsets of the `#` that really open a comment in `command`. Never raises:
+    on anything odd there are none, which keeps every word in view."""
+    if "#" not in (command or ""):
+        return frozenset()
+    try:
+        return _shell_nesting(command)[0]
+    except Exception:
+        return frozenset()
 
 
 def split_segments(command):
     """Split a command line into pipeline/list segments on ; && || | and
     newlines, respecting single and double quotes. Cheap hand-rolled scan --
     shlex on an arbitrary command line can raise, and we must never raise."""
+    return [seg for seg, _op in split_segments_ops(command)]
+
+
+def split_segments_ops(command):
+    """`split_segments`, with the operator that FOLLOWS each segment: "|" for a
+    pipe into the next one, ";", "&&", "||", "&", or "" at the end. A comment is
+    dropped to the end of its line, so an apostrophe in it can neither join the
+    following lines into one quoted segment nor hide the commands on them."""
     segs = []
+    ops = []
     buf = []
     quote = None
     i = 0
+    comments = _comment_starts(command)
     n = len(command or "")
     while i < n:
         ch = command[i]
+        if i in comments:
+            newline = command.find("\n", i)
+            i = n if newline == -1 else newline
+            continue
         if quote:
             buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
             if ch == quote:
                 quote = None
             i += 1
+            continue
+        if ch == "$" and command.startswith("$'", i):
+            end = _ansi_string_end(command, i)
+            buf.append(command[i:end])
+            i = end
             continue
         if ch in "'\"":
             quote = ch
@@ -173,19 +371,165 @@ def split_segments(command):
             continue
         if ch in ";\n":
             segs.append("".join(buf))
+            ops.append(";")
             buf = []
+            i += 1
+            continue
+        if ch == "&" and ((buf and buf[-1] in "<>") or command[i + 1:i + 2] == ">"):
+            buf.append(ch)  # `2>&1` and `&> f` are redirections
             i += 1
             continue
         if ch in "&|":
             segs.append("".join(buf))
             buf = []
+            start = i
             while i < n and command[i] in "&|":
                 i += 1
+            ops.append(command[start:i])
             continue
         buf.append(ch)
         i += 1
     segs.append("".join(buf))
-    return [s.strip() for s in segs if s.strip()]
+    ops.append("")
+    return [(seg.strip(), op) for seg, op in zip(segs, ops) if seg.strip()]
+
+
+_SUBSTITUTION_DEPTH = 8
+
+# Characters one rule may read while following nested code in one command. The
+# hook has 5 seconds and fails open, so a command built to keep a rule reading
+# would take every rule down with it. The whole command is always read once.
+_SCAN_LIMIT = 1000000
+
+
+class _ScanWork:
+    """What one rule has read of one command, across its recursion."""
+
+    def __init__(self):
+        self.seen = set()
+        self.left = _SCAN_LIMIT
+
+    def spend(self, text, key=None):
+        """False when the caller should stop: it has read `key` already, or the
+        allowance is gone. Past that point the rule gives up on the nesting it
+        has not reached, and the other rules still run."""
+        if self.left < 0 or (key is not None and key in self.seen):
+            return False
+        if key is not None:
+            self.seen.add(key)
+        self.left -= len(text) + 1
+        return True
+
+
+def _may_substitute(command):
+    return any(mark in (command or "") for mark in ("$(", "`", "<(", ">("))
+
+
+def _closing_paren(text, i):
+    """Index of the `)` closing a parenthesis opened just before `i`, or the
+    end of `text` when it never closes."""
+    depth = 1
+    quote = None
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == '"':
+            quote = None if quote == '"' else '"'
+        elif quote is None:
+            if ch == "'":
+                quote = "'"
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if not depth:
+                    return i
+        i += 1
+    return n
+
+
+def _outer_substitutions(command):
+    """(offset, body) of each outermost `$(...)`, backtick and `<(...)` /
+    `>(...)` substitution. Single-quoted text, `$'...'`, escapes and comments are
+    skipped, as the shell skips them, and `$((...))` is arithmetic rather than a
+    command.
+    Never raises."""
+    out = []
+    try:
+        s = command or ""
+        n = len(s)
+        i = 0
+        quote = None
+        comments = _comment_starts(s)
+        while i < n:
+            ch = s[i]
+            if i in comments:
+                newline = s.find("\n", i)
+                i = n if newline == -1 else newline
+                continue
+            if quote == "'":
+                if ch == "'":
+                    quote = None
+                i += 1
+                continue
+            if ch == "\\":
+                i += 2
+                continue
+            if quote is None and s.startswith("$'", i):
+                i = _ansi_string_end(s, i)
+                continue
+            if ch == "'" and quote is None:
+                quote = "'"
+            elif ch == '"':
+                quote = None if quote == '"' else '"'
+            elif s.startswith("$((", i):
+                i += 3
+                continue
+            elif s.startswith("$(", i) or (quote is None and s[i:i + 2] in ("<(", ">(")):
+                end = _closing_paren(s, i + 2)
+                out.append((i, s[i + 2:end]))
+                i = end + 1
+                continue
+            elif ch == "`":
+                end = s.find("`", i + 1)
+                end = n if end == -1 else end
+                out.append((i, s[i + 1:end]))
+                i = end + 1
+                continue
+            i += 1
+    except Exception:
+        pass
+    return out
+
+
+def command_substitutions(command, _depth=0):
+    """Body of every command substitution, outermost first, nested ones too.
+    The depth is bounded because this runs on untrusted text before any rule
+    does: a deep enough `$($($(...` must not reach Python's recursion limit."""
+    out = []
+    if _depth >= _SUBSTITUTION_DEPTH or not _may_substitute(command):
+        return out
+    for _offset, body in _outer_substitutions(command):
+        if body.strip():
+            out.append(body)
+            out.extend(command_substitutions(body, _depth + 1))
+    return out
+
+
+def all_segments(command):
+    """Top-level segments plus those of every substitution: `echo $(sudo x)`
+    runs `sudo x`. For the rules that ask what runs. R1 reads the top level and
+    substitutions apart, because a captured value is not a printed one."""
+    segs = split_segments(command)
+    for body in command_substitutions(command):
+        segs.extend(split_segments(body))
+    return segs
 
 
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
@@ -210,16 +554,50 @@ _ENV_VALUE_OPTS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
 _TIMEOUT_VALUE_OPTS = {"-s", "--signal", "-k", "--kill-after"}
 
 
-def _wrapped_command(toks):
-    """The tokens of the command an `env`/`timeout` wrapper runs, or None when
-    it runs none."""
-    wrapper, i = toks[0].rsplit("/", 1)[-1], 1
+def _env_split_string(toks, i):
+    """The tokens `env -S STRING` runs, when toks[i] is that option, else None.
+    The string is the command: `env -S "cat .env"` reads the file."""
+    t = toks[i]
+    if t in ("-S", "--split-string"):
+        i += 1
+        value = toks[i] if i < len(toks) else ""
+    elif t.startswith("--split-string="):
+        value = t.split("=", 1)[1]
+    elif t.startswith("-S"):
+        value = t[2:]
+    else:
+        return None
+    i += 1
+    quote = value[:1]
+    if quote in ("'", '"'):
+        # words() split a quoted string on its spaces: put it back together.
+        while not (len(value) > 1 and value.endswith(quote)) and i < len(toks):
+            value += " " + toks[i]
+            i += 1
+        value = value.strip(quote)
+    while value.endswith("\\") and i < len(toks):  # `sudo\ reboot`
+        value = value[:-1] + " " + toks[i]
+        i += 1
+    return value.split() + toks[i:]
+
+
+def _wrapped_command(toks, start=0):
+    """Where the command run by the `env`/`timeout` wrapper at toks[start]
+    begins, as (tokens, index), or None when it runs none."""
+    wrapper, i = toks[start].rsplit("/", 1)[-1], start + 1
     value_opts = _ENV_VALUE_OPTS if wrapper == "env" else _TIMEOUT_VALUE_OPTS
     while i < len(toks):
         t = toks[i]
         if t == "--":
             i += 1
             break
+        if wrapper == "env":
+            if t == "-":  # `env -` is `env -i`
+                i += 1
+                continue
+            split = _env_split_string(toks, i)
+            if split is not None:
+                return (split, 0) if split else None
         if t.startswith("-") and len(t) > 1:
             i += 2 if t in value_opts else 1
             continue
@@ -229,42 +607,137 @@ def _wrapped_command(toks):
         break
     if wrapper == "timeout":
         i += 1  # the duration
-    return toks[i:] or None
+    return (toks, i) if i < len(toks) else None
+
+
+# Words that put a command straight after them. A segment starts at one of
+# these whenever a command sits inside a compound: `if x; then cat .env; fi`.
+_COMPOUND_WORDS = {"{", "!", "if", "then", "elif", "else", "do", "while", "until"}
+_FUNCTION_HEAD_RE = re.compile(r"^[A-Za-z_][\w.-]*\(\)\{?$")
+_REDIRECT_RE = re.compile(r"^\d*[<>]")
+_REDIRECT_OP_RE = re.compile(r"^\d*([<>]+\|?&?)")
+_GLUED_REDIRECT_RE = re.compile(r"^([^<>$`]+)([<>]+\|?&?)(.*)$")
+
+
+def _drop_group_closers(toks, excess):
+    """Take `excess` closing parens off the end of the segment. They close a
+    subshell and belong to no word: `.env)` hid `.env` from R1."""
+    for i in range(len(toks) - 1, -1, -1):
+        if excess <= 0:
+            break
+        word = toks[i]
+        trailing = len(word) - len(word.rstrip(")"))
+        n = min(trailing, excess)
+        if n:
+            toks[i] = word[:-n]
+            excess -= n
+    return [t for t in toks if t]
+
+
+def _word_after_redirects(toks, start=0):
+    """True when toks[start:] holds a word that is not a redirection or its
+    target."""
+    i = start
+    while i < len(toks):
+        op = _REDIRECT_OP_RE.match(toks[i])
+        if not op:
+            return True
+        i += 2 if op.end() == len(toks[i]) else 1
+    return False
+
+
+def _is_case_pattern(toks, start=0):
+    """`x)`, `a|b)` or a bare `)` with a command after it. With nothing after
+    it, or only redirections, the word is the last one of a subshell."""
+    head = toks[start]
+    return head.endswith(")") and "(" not in head and _word_after_redirects(toks, start + 1)
+
+
+def _after_in(toks, start):
+    """Index just past the `in` of a `case WORD in`, or the end when none."""
+    try:
+        return toks.index("in", start) + 1
+    except ValueError:
+        return len(toks)
 
 
 def program_of(segment):
-    """First real command word of a segment, skipping leading VAR=val
-    assignments and wrappers like nice/time. Returns (program, args)."""
+    """First real command word of a segment, skipping what the shell reads
+    before it: subshell and group openers, compound-command words, a function
+    head, a case pattern, leading VAR=val assignments and wrappers like
+    nice/time. A subshell's closing parens are dropped from the arguments.
+    Returns (program, args)."""
     toks = words(segment)
-    while toks:
-        if _ASSIGN_RE.match(toks[0]):
-            toks = toks[1:]
+    at = 0  # an index: re-slicing per word is quadratic on `! ! ! ...`
+    opened = 0
+    inputs = []  # files redirected in ahead of the command: `< .env cat`
+    while at < len(toks):
+        head = toks[at]
+        op = _REDIRECT_OP_RE.match(head)
+        if op:
+            target = head[op.end():]
+            at += 1
+            if not target and at < len(toks):
+                target = toks[at]
+                at += 1
+            if op.group(1).startswith("<") and target:
+                inputs.append(target)
             continue
-        if toks[0].rsplit("/", 1)[-1] in _VALUE_WRAPPERS:
+        if head.startswith("("):
+            rest = head.lstrip("(")
+            opened += len(head) - len(rest)
+            if rest:
+                toks[at] = rest
+            else:
+                at += 1
+            continue
+        if head in _COMPOUND_WORDS or _FUNCTION_HEAD_RE.match(head):
+            at += 1
+            continue
+        if head == "function":
+            at += 2
+            continue
+        if head == "case":
+            at = _after_in(toks, at)
+            continue
+        if _is_case_pattern(toks, at):
+            at += 1
+            continue
+        if _ASSIGN_RE.match(head):
+            at += 1
+            continue
+        if head.rsplit("/", 1)[-1] in _VALUE_WRAPPERS:
             # `env FOO=1 sudo ...`, `timeout 5 rm -rf /`: the wrapper runs the
             # command after its own options. A bare `env` (or one with nothing
             # after its options) is itself the program and stays it.
-            rest = _wrapped_command(toks)
-            if rest is None:
+            found = _wrapped_command(toks, at)
+            if found is None or not _word_after_redirects(*found):
                 break
-            toks = rest
+            toks, at = found
             continue
-        if toks[0] in _SKIP_PREFIX:
-            toks = toks[1:]
+        if head in _SKIP_PREFIX:
+            at += 1
             # a wrapper's own flags (nice -n 10, stdbuf -oL) are not the program
-            while toks and toks[0].startswith("-"):
-                flag = toks[0]
-                toks = toks[1:]
-                if flag in ("-n", "-p", "-o", "-e", "-i") and toks and not toks[0].startswith("-"):
-                    if toks[0].lstrip("+-").isdigit():
-                        toks = toks[1:]
+            while at < len(toks) and toks[at].startswith("-"):
+                flag = toks[at]
+                at += 1
+                if flag in ("-n", "-p", "-o", "-e", "-i") and at < len(toks) and not toks[at].startswith("-"):
+                    if toks[at].lstrip("+-").isdigit():
+                        at += 1
             continue
         break
+    toks = toks[at:]
+    if ")" in (segment or ""):
+        code = _QUOTED_RE.sub('""', segment)
+        toks = _drop_group_closers(toks, code.count(")") - code.count("(") + opened)
     if not toks:
         return None, []
+    glued = _GLUED_REDIRECT_RE.match(toks[0])
+    if glued:  # `cat<.env` is one word to words()
+        toks = [glued.group(1)] + ([glued.group(3)] if glued.group(3) else []) + toks[1:]
     prog = toks[0]
     base = prog.rsplit("/", 1)[-1]
-    return base, toks[1:]
+    return base, toks[1:] + inputs
 
 
 def _expand(path):
@@ -325,6 +798,8 @@ SECRET_PATH_RES = [
     # protected exactly as well as `cat ~/.config/airlock/env`.
     re.compile(r"[\\/]jev-kit[\\/]env\b", re.IGNORECASE),
     re.compile(r"[\\/]airlock[\\/]env\b", re.IGNORECASE),
+    # The same two written relative to ~/.config: `cat jev-kit/env`.
+    re.compile(r"^(\.[\\/])*(jev-kit|airlock)[\\/]env$", re.IGNORECASE),
     re.compile(r"\.credentials\.json\b"),
     re.compile(r"\bcredentials(\.json|\.yml|\.yaml|\.ini)?\b(?!\.example)"),
     re.compile(r"(^|/)\.env(\.[A-Za-z0-9_-]+)?$"),
@@ -459,6 +934,7 @@ R1_SUGGESTION_POSIX = (
     "    set -a; . ~/.config/jev-kit/env; set +a\n"
     "and confirm it is present WITHOUT revealing it:\n"
     "    [ -n \"$TYPESAFE_API_KEY\" ] && echo 'key loaded'\n"
+    "List variable names without their values with `compgen -e`.\n"
     "If output might contain a key, pipe it through:\n"
     "    sed 's/apikey_[A-Za-z0-9_]*/[REDACTED]/g'"
 )
@@ -515,6 +991,36 @@ def _secret_path_in(tokens):
     return None
 
 
+def _key_file_paths():
+    """Every path the key can live at on this machine. Never raises."""
+    found = []
+    try:
+        found = list(keyfile.default_env_files()) + list(keyfile.legacy_env_files())
+        found += [keyfile.key_file(), keyfile.pointer_file_path(),
+                  keyfile.pointer_target(check=False)]
+    except Exception:
+        pass
+    return {os.path.normpath(_expand(str(p))) for p in found if p}
+
+
+def _key_file_from(tokens, cwd):
+    """The relative path in `tokens` that lands on a key file when read from
+    `cwd`: `cd ~/.config/jev-kit && cat env`. Key files only, because a bare
+    word such as `credentials` in a directory's path must not make every file
+    in that directory a secret."""
+    if not cwd:
+        return None
+    known = None
+    for tok in _path_parts(tokens):
+        if tok.startswith(("-", "/", "~", "$")):
+            continue
+        if known is None:
+            known = _key_file_paths()
+        if os.path.normpath(os.path.join(cwd, tok)) in known:
+            return tok
+    return None
+
+
 def _ambiguous_path_in(tokens):
     for tok in tokens:
         if tok.startswith("-") or _is_safe_path(tok):
@@ -538,30 +1044,197 @@ def _quiet_grep(args):
     return False
 
 
-_SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 _ASSIGN_BUILTINS = {"export", "local", "readonly", "declare", "typeset"}
 
 
-def _substituted_segments(command):
-    """Segments of every `$(...)` and backtick substitution in the command.
-    `echo "$(cat .env)"` prints the file, but its only segment is an echo."""
+_ASSIGN_CHECK_LIMIT = 64
+
+
+def _substituted_segments(command, _depth=0, work=None):
+    """Segments of every substitution in the command. `echo "$(cat .env)"`
+    prints the file, but its only segment is an echo."""
     out = []
+    if _depth >= _SUBSTITUTION_DEPTH or not _may_substitute(command):
+        return out
+    if work and not work.spend(command):
+        return out
     try:
         command = strip_heredocs(command)
-        for m in _SUBST_RE.finditer(command):
+        for index, (offset, inner) in enumerate(_outer_substitutions(command)):
             # `KEY=$(cat ~/.config/jev-kit/env)` loads the value without
-            # printing it, which is what R1's own advice asks for.
-            before = split_segments(command[:m.start()])
+            # printing it, which is what R1's own advice asks for. Past the
+            # first few the exemption ends, because each check rescans the
+            # command so far.
+            checked = index < _ASSIGN_CHECK_LIMIT and (not work or work.spend(command[:offset]))
+            before = split_segments(command[:offset]) if checked else []
             toks = words(before[-1]) if before else []
-            if toks and all(_ASSIGN_RE.match(t) or t in _ASSIGN_BUILTINS for t in toks):
+            # Glued to the assignment: `x=1 $(cat .env)` runs the file's text
+            # as a command, and the shell's error prints it.
+            glued = not command[:offset].endswith((" ", "\t"))
+            if glued and toks and all(_ASSIGN_RE.match(t) or t in _ASSIGN_BUILTINS for t in toks):
                 continue
-            inner = m.group(1) if m.group(1) is not None else m.group(2)
             if inner.startswith("<"):
                 inner = "cat " + inner[1:]  # `$(<.env)` is bash for `$(cat .env)`
             out.extend(split_segments(inner))
+            out.extend(_substituted_segments(inner, _depth + 1, work))
     except Exception:
         return []
     return out
+
+
+# `${VAR:+word}` and `${VAR+word}` expand to `word` or nothing, never to the
+# value, and `${#VAR}` is its length. The word must be plain text: no `$`, no
+# backtick, no `(` and no backslash, so it cannot smuggle a second expansion
+# (`${KEY:+$KEY}`) or a command substitution back in.
+_VALUELESS_EXPANSION_RE = re.compile(
+    r"\$\{#[A-Za-z_][A-Za-z_0-9]*\}"
+    r"|\$\{[A-Za-z_][A-Za-z_0-9]*:?\+[^}$`(\\]*\}"
+)
+# `${!name}` is indirection: it prints whatever variable `name` names.
+_INDIRECT_EXPANSION_RE = re.compile(r"\$\{!")
+
+_SHELL_META = set("<>`$;&|(){}")
+
+
+def _lex(seg):
+    """POSIX shlex words of one segment, or None when it cannot be lexed
+    cleanly or carries any redirection, substitution or operator character
+    outside quotes. A filter like that is never treated as names-only."""
+    if _SHELL_META & set(_QUOTED_RE.sub("", seg)):
+        return None
+    try:
+        lexer = shlex.shlex(seg, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except Exception:
+        return None
+
+
+def _class_is_name_chars(body):
+    """A bracket class may hold only A-Z, a-z, 0-9 ranges and the literal
+    characters [A-Za-z0-9_]. Any other range (`[*-?]` spans `=`) or a
+    negation refuses."""
+    i = 0
+    while i < len(body):
+        if body[i:i + 3] in ("A-Z", "a-z", "0-9"):
+            i += 3
+        elif re.match(r"[A-Za-z0-9_]", body[i]):
+            i += 1
+        else:
+            return False
+    return bool(body)
+
+
+def _name_only_alternative(alt):
+    """`^PREFIX...`: anchored, a literal prefix of 3+ name characters (so a
+    continuation line of a multi-line value cannot match by accident), then
+    only name characters, name-only classes and quantifiers. No backslash, no
+    dot, no negation, no `=`."""
+    m = re.match(r"^\^[A-Za-z0-9_]{3,}", alt)
+    if not m:
+        return False
+    rest = alt[m.end():]
+    i = 0
+    while i < len(rest):
+        c = rest[i]
+        if c == "[":
+            j = rest.find("]", i + 1)
+            if j < 0 or not _class_is_name_chars(rest[i + 1:j]):
+                return False
+            i = j + 1
+        elif re.match(r"[A-Za-z0-9_*+?]", c):
+            i += 1
+        elif c == "{":
+            j = rest.find("}", i)
+            if j < 0 or not re.match(r"^\d+(,\d*)?$", rest[i + 1:j]):
+                return False
+            i = j + 1
+        else:
+            return False
+    return True
+
+
+def _grep_flags(args):
+    """Split grep args into (short-flag letters, long flags, operands), or
+    None if a flag takes a value (-e/-f/-A/-m ...), which would change what the
+    operands mean."""
+    letters, longs, operands = set(), set(), []
+    for a in args:
+        if a.startswith("--"):
+            if "=" in a or a in ("--regexp", "--file"):
+                return None
+            longs.add(a)
+        elif a.startswith("-") and len(a) > 1:
+            if set(a[1:]) & set("efABCmd"):
+                return None
+            letters.update(a[1:])
+        else:
+            operands.append(a)
+    return letters, longs, operands
+
+
+_STDERR_REDIRECT_RE = re.compile(r"^2>(&[12]|/dev/null)$")
+_WC_FLAGS = {"-l", "-c", "-w", "-m", "--lines", "--bytes", "--words", "--chars"}
+
+
+def _names_only_filter(toks):
+    """True iff this stage, reading env output on stdin, can only print
+    variable names or a count, never any part of a value.
+
+    `cut -d= -f1 -s` is deliberately absent. It keeps whatever comes before an
+    `=` on any line, and the line of a multi-line value that ends in base64
+    padding is a piece of that value. `compgen -e` lists the names safely."""
+    if not toks:
+        return False
+    prog, args = toks[0].rsplit("/", 1)[-1], toks[1:]
+    if prog == "wc":
+        return all(a in _WC_FLAGS for a in args)
+    if prog in ("grep", "egrep"):
+        parsed = _grep_flags(args)
+        if parsed is None:
+            return False
+        letters, longs, operands = parsed
+        if letters & set("qcl") or longs & {"--quiet", "--silent", "--count", "--files-with-matches"}:
+            return not operands[1:]  # no file operand after the pattern
+        only = "o" in letters or "--only-matching" in longs
+        if not only or len(operands) != 1 or "P" in letters or "--perl-regexp" in longs:
+            return False
+        return all(_name_only_alternative(x) for x in re.split(r"\\\||\|", operands[0]))
+    return False
+
+
+def _writes_only_to_next_stage(toks):
+    """True iff this stage between `env` and the filter sends everything down
+    the pipe. tee, `sort -o FILE`, `uniq - FILE`, `sed w`, `awk print > file` and
+    anything not named here can write elsewhere, so they end the exemption."""
+    prog, args = toks[0].rsplit("/", 1)[-1], toks[1:]
+    if prog in ("grep", "egrep"):
+        parsed = _grep_flags(args)
+        return parsed is not None and len(parsed[2]) == 1
+    if prog in ("head", "tail"):
+        return all(re.match(r"^-\d+$", a) for a in args)
+    if prog in ("sort", "uniq"):
+        return all(re.match(r"^-[bcdfinruz]+$", a) for a in args)
+    return False
+
+
+def _names_only_pipe(pairs, idx):
+    """True iff segment `idx` (a bare `env`) pipes straight into a names-only
+    filter, through stages that write only to the next one. Never raises."""
+    try:
+        j = idx
+        while pairs[j][1] == "|" and j + 1 < len(pairs):
+            j += 1
+            toks = _lex(pairs[j][0])
+            if not toks:
+                return False
+            if _names_only_filter(toks):
+                return True
+            if not _writes_only_to_next_stage(toks):
+                return False
+        return False
+    except Exception:
+        return False
 
 
 def _reader_behind(prog, args):
@@ -604,17 +1277,40 @@ def prefilter_secret(ctx):
     command = ctx["command"]
     if not command:
         return None
+    return _secret_in_shell(command, cwd=ctx.get("cwd") or "")
 
-    for seg in ctx["segments"] + _substituted_segments(command):
-        prog, args = _reader_behind(*program_of(seg))
+
+def _secret_in_shell(command, depth=0, cwd="", work=None):
+    """R1 over a command line, and over any code it hands to another shell:
+    `bash -c 'cat .env'` and `eval cat .env` print the file too.
+
+    `_substituted_segments` flattens every level, so each level of
+    `eval $(eval $(...))` reaches the same scripts again. `work` keeps that to
+    one reading of each, and ends the scan for the shapes that differ on each
+    path."""
+    if not command or depth > _HANDED_CODE_DEPTH:
+        return None
+    work = work or _ScanWork()
+    if not work.spend(command, (command, depth, cwd)):
+        return None
+    pairs = split_segments_ops(strip_heredocs(command))
+    top_level = len(pairs)
+    for seg_idx, seg in enumerate([seg for seg, _op in pairs] + _substituted_segments(command, work=work)):
+        handed = _secret_in_shell(_handed_code(seg), depth + 1, cwd, work)
+        if handed:
+            return handed
+        prog, args = _reader_behind(*_unsudo(*program_of(seg)))
         if prog is None:
+            continue
+        if prog == "cd" and args:
+            cwd = os.path.join(cwd, _expand(args[0]))
             continue
 
         # a reader aimed at a known secret store
         if prog in READERS or _windows_reader(prog):
             if prog in ("grep", "egrep", "rg", "ag") and _quiet_grep(args):
                 continue
-            hit = _secret_path_in(args)
+            hit = _secret_path_in(args) or _key_file_from(args, cwd)
             if hit:
                 return Match(
                     "`%s` on a secret store (%s) would print its contents" % (prog, hit),
@@ -627,9 +1323,14 @@ def prefilter_secret(ctx):
                     R1_SUGGESTION, ask=True, extra={"target": amb, "kind": "reader"},
                 )
 
-        # echo/printf/printenv of a secret-named variable
+        # echo/printf/printenv of a secret-named variable. `${VAR:+set}`,
+        # `${VAR+set}` and `${#VAR}` never expand to the value: they are the
+        # documented way to check a key is present, so they are dropped first.
         if prog in ("echo", "printf"):
-            for name in SECRET_VAR_RE.findall(seg):
+            if _INDIRECT_EXPANSION_RE.search(seg):
+                return Match("`%s` of an indirect expansion (${!name}) can print any variable" % prog,
+                             R1_SUGGESTION)
+            for name in SECRET_VAR_RE.findall(_VALUELESS_EXPANSION_RE.sub("", seg)):
                 if SECRET_VAR_NAME_RE.search(name):
                     return Match(
                         "`%s` would print $%s, whose name says it holds a secret" % (prog, name),
@@ -642,8 +1343,14 @@ def prefilter_secret(ctx):
                 if SECRET_VAR_NAME_RE.search(a):
                     return Match("`printenv %s` would print a secret value" % a, R1_SUGGESTION)
 
-        # an unfiltered environment dump
+        # An unfiltered environment dump, unless it is piped straight into a
+        # filter that keeps only names or a count (`env | wc -l`,
+        # `env | grep -o '^PAPERCLIP[A-Z_]*'`, `env | grep -c X`). `2>&1` does
+        # not stop `env` printing.
+        args = [a for a in args if not _STDERR_REDIRECT_RE.match(a)]
         if prog in ("env", "set", "export", "declare") and not args:
+            if prog == "env" and seg_idx < top_level and _names_only_pipe(pairs, seg_idx):
+                continue
             if prog in ("env", "set"):
                 return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
         if prog == "export" and args == ["-p"]:
@@ -661,6 +1368,10 @@ def prefilter_secret(ctx):
                     "Drop -v/--verbose when a credential is on the command line, or move the token into a "
                     "variable and pipe the output through sed 's/apikey_[A-Za-z0-9_]*/[REDACTED]/g'.",
                 )
+    for script in _stdin_scripts(command):
+        handed = _secret_in_shell(script, depth + 1, cwd, work)
+        if handed:
+            return handed
     return None
 
 
@@ -1062,6 +1773,12 @@ def _sudo_rest(toks, idx):
     return [t for t in toks[i:] if not t.startswith("-") or t in _PKG_SUBS]
 
 
+def _run_segments(ctx):
+    """Every segment the shell will run, substitutions included. A hand-built
+    ctx may carry only `segments`."""
+    return ctx.get("all_segments") or ctx["segments"]
+
+
 def _is_named_install(rest):
     prog = rest[0].rsplit("/", 1)[-1] if rest else ""
     return (prog in _PKG_INSTALLERS and len(rest) > 2 and rest[1] in _PKG_SUBS)
@@ -1074,34 +1791,19 @@ def prefilter_sudo(ctx):
     # the index refresh is part of it. Only allowed when the same command
     # carries the named install itself.
     has_named_install = False
-    for seg in ctx["segments"]:
-        prog0, _a = program_of(seg)
-        if prog0 != "sudo":
-            continue
-        toks0 = words(seg)
-        for i, t in enumerate(toks0):
-            if t.rsplit("/", 1)[-1] == "sudo":
-                if _is_named_install(_sudo_rest(toks0, i)):
-                    has_named_install = True
-                break
-    for seg in ctx["segments"]:
-        toks = words(seg)
-        if not toks:
-            continue
+    segments = _run_segments(ctx)
+    for seg in segments:
+        prog0, args0 = program_of(seg)
+        if prog0 == "sudo" and _is_named_install(_sudo_rest(["sudo"] + args0, 0)):
+            has_named_install = True
+    for seg in segments:
         # Command position only: a quoted argument or a search pattern that
         # merely contains the word is not an invocation.
-        prog, _args = program_of(seg)
+        prog, args = program_of(seg)
         if prog != "sudo":
             continue
-        idx = None
-        for i, t in enumerate(toks):
-            if t.rsplit("/", 1)[-1] == "sudo":
-                idx = i
-                break
-        if idx is None:
-            continue
-        rest = _sudo_rest(toks, idx)
-        flags = toks[idx + 1:]
+        rest = _sudo_rest(["sudo"] + args, 0)
+        flags = args
 
         # any sudo touching a path under $HOME
         for t in flags:
@@ -1214,6 +1916,9 @@ _XARGS_VALUE_OPTS = {
 # git's global options that take the next token as their value.
 _GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
                    "--exec-path", "--config-env", "--super-prefix"}
+# git push options that take the next token as their value. A leading `+` on
+# that value is not a refspec.
+_PUSH_VALUE_OPTS = {"--push-option", "--repo", "--receive-pack", "--exec"}
 # redis-cli options that take the next token as a value. The first token
 # left after them is the Redis command; a later FLUSHALL is a key or a
 # pattern (`redis-cli GET FLUSHALL`, Codex P2, PR #17).
@@ -1260,29 +1965,43 @@ _SUDO_VALUE_LONG = {
 }
 
 
+# Sudo chains read in full, word for word, before `_unsudo` stops re-reading
+# what each one runs. No real command comes near this; `sudo env sudo env ...`
+# re-read without limit is quadratic and runs past the hook's 5 s timeout.
+_SUDO_REREADS = 16
+
+
 def _unsudo(prog, args):
     """R7 judges what runs, not how it was elevated (R5 owns `sudo`)."""
-    while prog == "sudo" and args:
-        rest = list(args)
-        while rest and rest[0].startswith("-"):
-            opt, rest = rest[0], rest[1:]
+    toks, start, rereads = args, 0, 0
+    while prog == "sudo" and start < len(toks):
+        at = start  # an index: `sudo sudo sudo ...` must stay linear
+        while at < len(toks) and toks[at].startswith("-"):
+            opt = toks[at]
+            at += 1
             if opt == "--":
                 break
             if opt.startswith("--"):
-                if opt in _SUDO_VALUE_LONG and rest:
-                    rest = rest[1:]
+                if opt in _SUDO_VALUE_LONG and at < len(toks):
+                    at += 1
                 continue
             # A short cluster (`-iu root`, `-uroot`): the first value-taking
             # letter takes the rest of the word, or the next word if none.
             for j, ch in enumerate(opt[1:], 1):
                 if ch in _SUDO_VALUE_SHORT:
-                    if j == len(opt) - 1 and rest:
-                        rest = rest[1:]
+                    if j == len(opt) - 1 and at < len(toks):
+                        at += 1
                     break
-        if not rest:
+        if at >= len(toks):
             break
-        prog, args = rest[0].rsplit("/", 1)[-1], rest[1:]
-    return prog, args
+        base = toks[at].rsplit("/", 1)[-1]
+        if base == "sudo" or rereads >= _SUDO_REREADS:
+            prog, start = base, at + 1
+            continue
+        rereads += 1
+        prog, toks = program_of(" ".join(toks[at:]))
+        start = 0
+    return prog, toks[start:]
 
 
 def _is_recursive_rm(args):
@@ -1296,6 +2015,8 @@ def _whole_tree_target(a):
     matched nothing, so `rm -rf /` passed R7 silently while `rm -rf ~` warned
     (found by the tamper-cases corpus, 2026-09-24)."""
     raw = a
+    if raw and not raw.strip("/"):  # `//` strips to nothing, and so does `/`
+        return raw
     if raw in ("/", "/*", "~", "~/", "$HOME", "${HOME}", "*", ".", "./", "..", "../", "./*"):
         return raw
     p = _expand(raw)
@@ -1306,10 +2027,39 @@ def _whole_tree_target(a):
     return None
 
 
+def _force_push(args):
+    """True when `git push ARGS` forces an update: -f alone or in a cluster
+    (`-uf`), or a `+` refspec. --force-with-lease is the safe form, so it stays
+    quiet. The value of a value-taking option is neither."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            return any(r.startswith("+") and len(r) > 1 for r in args[i:])
+        if a == "--force":
+            return True
+        if a in _PUSH_VALUE_OPTS:
+            i += 1
+            continue
+        if a.startswith("--"):
+            continue
+        if a.startswith("-"):
+            # -o takes the rest of the word as its value (`-oci.skip`).
+            if "f" in a[1:].split("o", 1)[0]:
+                return True
+            if a.endswith("o"):
+                i += 1
+            continue
+        if a.startswith("+") and len(a) > 1:
+            return True
+    return False
+
+
 def prefilter_destructive(ctx):
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
-    for seg in ctx["segments"]:
+    for seg in _run_segments(ctx):
         prog, args = _unsudo(*program_of(seg))
         if prog == "git" and args:
             # The subcommand comes after git's global options: `git -C repo
@@ -1319,8 +2069,7 @@ def prefilter_destructive(ctx):
             if not args:
                 continue
             sub = args[0]
-            joined = " ".join(args)
-            if sub == "push" and re.search(r"(^|\s)(--force|-f)(\s|$)", " " + joined):
+            if sub == "push" and _force_push(args[1:]):
                 return Match("`git push --force` overwrites published history", R7_SUGGESTION)
             if sub == "reset" and "--hard" in args:
                 return Match("`git reset --hard` discards uncommitted work irreversibly", R7_SUGGESTION)
@@ -1412,11 +2161,12 @@ _RD_VALUE_OPTS = {
              "-U", "--other-user", "-R", "--chroot"},
 }
 _RD_SUDO_SHORT_VALUE = set("ugpCDhrtTUR")
-_RD_SUBST_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 # Compound-command words that put a command after them: `then rm -rf /`.
 _RD_KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until"}
 # Shell options that take the next word as their value: `bash -o pipefail -c`.
 _RD_SHELL_VALUE_OPTS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+_RD_SOURCE = {"source", "."}
+_HANDED_CODE_DEPTH = 8
 
 
 def _rd_unquote(tok):
@@ -1439,12 +2189,63 @@ def _rd_unquote(tok):
     return "".join(out)
 
 
-def _rd_shell_script(args):
+_ANSI_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b",
+                 "E": "\x1b", "f": "\f", "v": "\v", "'": "'", '"': '"', "\\": "\\", "?": "?"}
+_ANSI_ESCAPE_RE = re.compile(r"\\(.)", re.DOTALL)
+_WORD_END = frozenset(" \t\n;&|()<>")
+
+
+def _rd_shell_word(text):
+    """The first shell word of `text` as the program receives it, or None when
+    a quote never closes. Adjacent pieces are one word: `'a'\\''b'` is `a'b`.
+    A `$(...)` in double quotes keeps its own quotes, since it is still code."""
+    out = []
+    i = 0
+    n = len(text)
+    in_double = False
+    while i < n:
+        ch = text[i]
+        if not in_double and ch in _WORD_END:
+            break
+        if ch == "\\" and i + 1 < n:
+            nxt = text[i + 1]
+            if not in_double or nxt in '"\\$`':
+                out.append(nxt)
+            elif nxt != "\n":
+                out.append(ch + nxt)
+            i += 2
+        elif ch == '"':
+            in_double = not in_double
+            i += 1
+        elif not in_double and ch == "'":
+            end = text.find("'", i + 1)
+            if end == -1:
+                return None
+            out.append(text[i + 1:end])
+            i = end + 1
+        elif not in_double and text.startswith("$'", i):
+            end = _ansi_string_end(text, i)
+            body = text[i + 2:end - 1]
+            out.append(_ANSI_ESCAPE_RE.sub(lambda m: _ANSI_ESCAPES.get(m.group(1), m.group(0)), body))
+            i = end
+        elif text.startswith(("$(", "${", "`"), i):
+            end = _shell_nesting(text, i, one_construct=True)[1]
+            out.append(text[i:end])
+            i = end
+        else:
+            out.append(ch)
+            i += 1
+    return None if in_double else "".join(out)
+
+
+def _rd_shell_script(args, seg=None):
     """The script of `sh -c SCRIPT`, also when -c sits in a short-option
     cluster (`bash -lc`, `sh -xc`). Like bash, options are read up to the
     first non-option word, and a cluster ending in o/O takes the next word as
     its value (`-euo pipefail`, `-co pipefail SCRIPT`). None when the shell
-    runs no -c script."""
+    runs no -c script. `seg` is the segment `args` came from: `words` has
+    already lost the quoting and the newlines, and the words after a quoted
+    script are $0 and $1 rather than code (`bash -c 'cat .env' _ a`)."""
     has_c, i = False, 0
     while i < len(args):
         a = args[i]
@@ -1464,64 +2265,81 @@ def _rd_shell_script(args):
         break
     if not has_c:
         return None
-    return " ".join(args[i:]).strip("'\"")
+    rest = args[i:]
+    if seg and rest:
+        starts = [m.start() for m in re.finditer(r"\S+", seg)]
+        raw = seg[starts[-len(rest)]:]
+        if set(raw.split(None, 1)[0]) & set("'\"\\"):
+            script = _rd_shell_word(raw)
+            if script is not None:
+                return script
+    return " ".join(rest).strip("'\"")
 
 
 def _rd_command(toks, depth=0):
     """(program, args) behind assignments, wrappers and sudo, or the inner
     script's tokens for `sh -c`. Returns (None, []) when nothing runs."""
-    while toks:
-        if len(toks) > 1 and toks[1] == ")":
-            toks = toks[2:]  # a case pattern with a space before the paren: `x ) cmd`
+    at = 0  # an index: re-slicing per word is quadratic on `( ( ( ...`
+    n = len(toks)
+    while at < n:
+        if at + 1 < n and toks[at + 1] == ")":
+            at += 2  # a case pattern with a space before the paren: `x ) cmd`
             continue
-        t = _rd_unquote(toks[0].lstrip("({!"))
-        if not t or t in _RD_KEYWORDS:
-            toks = toks[1:]
+        t = _rd_unquote(toks[at].lstrip("({!"))
+        if not t or t in _RD_KEYWORDS or _FUNCTION_HEAD_RE.match(t):
+            at += 1
+            continue
+        if t == "function":
+            at += 2  # `function f {`
+            continue
+        redirect = _REDIRECT_OP_RE.match(t)
+        if redirect:
+            at += 2 if redirect.end() == len(t) else 1  # `> log rm -rf /`
             continue
         if t == "case":
             # `case WORD in PATTERN) cmd`: the command starts after the pattern
-            toks = toks[toks.index("in") + 1:] if "in" in toks else []
+            at = _after_in(toks, at)
             continue
         if t.endswith(")") and "(" not in t:
-            toks = toks[1:]  # a case pattern: `x)`, `a|b)`
+            at += 1  # a case pattern: `x)`, `a|b)`
             continue
         if _ASSIGN_RE.match(t):
-            toks = toks[1:]
+            at += 1
             continue
         base = t.rsplit("/", 1)[-1]
         if base in ("env", "timeout", "sudo") or base in _RD_PLAIN_WRAPPERS:
-            rest = toks[1:]
+            at += 1
             value_opts = _RD_VALUE_OPTS.get(base, set())
-            while rest and rest[0].startswith("-") and rest[0] != "-":
-                opt, rest = rest[0], rest[1:]
+            while at < n and toks[at].startswith("-") and toks[at] != "-":
+                opt = toks[at]
+                at += 1
                 if opt == "--":
                     break
                 if "=" in opt:
                     continue
                 if opt in value_opts:
-                    rest = rest[1:]
+                    at += 1
                     continue
                 if base == "sudo" and not opt.startswith("--"):
                     # a short cluster: `-iu root` takes the next word
                     for j, ch in enumerate(opt[1:], 1):
                         if ch in _RD_SUDO_SHORT_VALUE:
                             if j == len(opt) - 1:
-                                rest = rest[1:]
+                                at += 1
                             break
                 if base == "nice" and opt[1:].lstrip("-").isdigit():
                     continue  # `nice -10 cmd`
             if base == "env":
-                if rest and rest[0] == "-":
-                    rest = rest[1:]
-                while rest and _ASSIGN_RE.match(rest[0]):
-                    rest = rest[1:]
-            if base == "timeout" and rest:
-                rest = rest[1:]  # the duration
-            if not rest:
+                if at < n and toks[at] == "-":
+                    at += 1
+                while at < n and _ASSIGN_RE.match(toks[at]):
+                    at += 1
+            if base == "timeout" and at < n:
+                at += 1  # the duration
+            if at >= n:
                 return None, []
-            toks = rest
             continue
-        return base, toks[1:]
+        return base, toks[at + 1:]
     return None, []
 
 
@@ -1542,15 +2360,38 @@ def _rd_root_or_home(a):
     return p.rstrip("/") in ("", HOME)
 
 
-def _rd_hit(seg, depth=0):
+def _handed_code(seg):
+    """The script this one segment hands to a shell, or None: `eval ARGS`,
+    `sh -c SCRIPT`, or a here-string into a shell."""
     prog, args = _rd_command(words(seg))
-    script = _rd_shell_script(args) if prog in _RD_SHELLS and depth < 2 else None
-    if script is not None:
-        for inner in split_segments(script):
-            hit = _rd_hit(inner, depth + 1)
-            if hit:
-                return hit
-        return None
+    if prog == "eval":
+        return " ".join(_rd_unquote(a) for a in args)
+    if prog in _RD_SHELLS or prog in _RD_SOURCE:
+        script = _rd_shell_script(args, seg) if prog in _RD_SHELLS else None
+        if script is None and _rd_reads_stdin(seg):
+            script = _rd_herestring(seg)
+        return script
+    return None
+
+
+def _stdin_scripts(text):
+    """Scripts `text` feeds a shell on stdin: a heredoc whose opening line has a
+    shell reading stdin, or echo/printf piped straight into one."""
+    out = []
+    pairs = split_segments_ops(strip_heredocs(text))
+    for i, (seg, op) in enumerate(pairs):
+        if op == "|" and i + 1 < len(pairs) and _rd_reads_stdin(pairs[i + 1][0]):
+            printed = _rd_printed_text(seg)
+            if printed:
+                out.append(printed)
+    for line, body in scope.heredoc_bodies(text):
+        if any(_rd_reads_stdin(seg) for seg in split_segments(line)):
+            out.append(body)
+    return out
+
+
+def _rd_hit(seg):
+    prog, args = _rd_command(words(seg))
     if prog != "rm":
         return None
     args = [_rd_unquote(a) for a in args]
@@ -1566,26 +2407,108 @@ def _rd_hit(seg, depth=0):
     return None
 
 
+def _rd_reads_stdin(seg):
+    """True when this segment's shell takes its script from stdin: no -c, and
+    no script file named, or -s saying so. `source /dev/stdin` does the same."""
+    prog, args = _rd_command(words(seg))
+    if prog in _RD_SOURCE:
+        return bool(args) and args[0] in ("/dev/stdin", "/dev/fd/0")
+    if prog not in _RD_SHELLS or _rd_shell_script(args) is not None:
+        return False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if _REDIRECT_RE.match(a):
+            return True
+        if a == "--":
+            return i + 1 == len(args) or bool(_REDIRECT_RE.match(args[i + 1]))
+        if a in _RD_SHELL_VALUE_OPTS:
+            i += 2
+            continue
+        if a.startswith("-") and not a.startswith("--") and len(a) > 1:
+            if "s" in a[1:]:
+                return True
+            i += 2 if a[-1] in "oO" else 1
+            continue
+        if a.startswith("--") or (a.startswith("+") and len(a) > 1):
+            i += 1
+            continue
+        return False
+    return True
+
+
+def _rd_herestring(seg):
+    """The word a `<<<` here-string feeds, quoting removed and a `$'...'`
+    string's `\\n` turned into the newline it stands for, or None."""
+    at = seg.find("<<<")
+    if at < 0:
+        return None
+    rest = seg[at + 3:].lstrip()
+    ansi = rest.startswith("$'")
+    if ansi:
+        rest = rest[1:]
+    try:
+        parts = shlex.split(rest)
+    except ValueError:
+        parts = [rest.strip("'\"")]
+    if not parts:
+        return None
+    return parts[0].replace("\\n", "\n") if ansi else parts[0]
+
+
+def _rd_printed_text(seg):
+    """What an `echo` or `printf` segment writes, or None for any other
+    program. Good enough to read a script piped into a shell."""
+    prog, args = _rd_command(words(seg))
+    if prog not in ("echo", "printf"):
+        return None
+    args = [_rd_unquote(a.replace("\\n", "\n")) for a in args]
+    while prog == "echo" and args and args[0] in ("-n", "-e", "-ne", "-en"):
+        args = args[1:]
+    if prog == "printf" and args and "%" in args[0]:
+        args = args[1:]  # the format, when the script is its argument
+    return " ".join(args)
+
+
+def _rd_scan(text, depth=0, work=None):
+    """The root-or-home `rm` operand in `text` read as shell code, or None.
+    Follows every way a shell gets handed more code: a substitution, `eval`,
+    `sh -c`, and a script on stdin. Bounded, because each can nest in another."""
+    if not text or depth > _HANDED_CODE_DEPTH:
+        return None
+    work = work or _ScanWork()
+    if not work.spend(text, (text, depth)):
+        return None
+    code = strip_heredocs(text)
+    for seg in split_segments(code):
+        hit = _rd_hit(seg) or _rd_scan(_handed_code(seg), depth + 1, work)
+        if hit:
+            return hit
+    # One level at a time: each piece is a separate part of `text`, so the work
+    # stays linear in its length for each level of depth.
+    for inner in [body for _offset, body in _outer_substitutions(code)] + _stdin_scripts(text):
+        hit = _rd_scan(inner, depth + 1, work)
+        if hit:
+            return hit
+    return None
+
+
 def prefilter_root_delete(ctx):
     """`rm -r` of `/`, `/*`, `~`, `~/*` or `$HOME`, behind any wrapper, past
-    sudo and its options, inside `sh -c`, `$(...)` or backticks. R7-destructive
-    only warns; this shape alone is denied (Jonathan, 2026-10-02). A bare `*`,
-    `.` or a named subdirectory stays R7-destructive's warning."""
+    sudo and its options, and anywhere a shell is handed the code: `sh -c`,
+    `eval`, `$(...)`, backticks, a heredoc or here-string into a shell, or a
+    pipe from echo/printf. A heredoc that goes anywhere else is data.
+    R7-destructive only warns; this shape alone is denied (Jonathan,
+    2026-10-02). A bare `*`, `.` or a named subdirectory stays
+    R7-destructive's warning."""
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
-    segs = list(ctx["segments"])
-    try:
-        for m in _RD_SUBST_RE.finditer(strip_heredocs(ctx.get("command") or "")):
-            segs.extend(split_segments(m.group(1) if m.group(1) is not None else m.group(2)))
-    except Exception:
-        pass
-    for seg in segs:
-        hit = _rd_hit(seg)
-        if hit:
-            # strict: neither an `[airlock-ok: ...]` stamp nor the loop
-            # allowance (a repeat of a denied call passes) lets this through.
-            return Match("`rm -r %s` would delete the whole filesystem or home directory" % hit,
-                         R7_ROOT_SUGGESTION, extra={"strict": True})
+    hit = _rd_scan(ctx.get("command") or "")
+    if hit:
+        # strict: neither an `[airlock-ok: ...]` stamp nor the loop
+        # allowance (a repeat of a denied call passes) lets this through.
+        return Match("`rm -r %s` would delete the whole filesystem or home directory" % hit,
+                     R7_ROOT_SUGGESTION, extra={"strict": True})
     return None
 
 
@@ -2431,6 +3354,7 @@ def build_ctx(data, tool_name=None):
         # question set (R10) can supply the evidence for it.
         "transcript_path": data.get("transcript_path") or "",
         "segments": split_segments(strip_heredocs(command)) if command else [],
+        "all_segments": all_segments(strip_heredocs(command)) if command else [],
     }
 
 
