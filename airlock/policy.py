@@ -128,7 +128,7 @@ def evaluate_tier(task_kind, task_kind_confidence, states_prior_failed_attempts,
 
 
 def tier_entry_fields(verdict, task_kind, task_kind_confidence, margin,
-                      prior_failed, chosen_type):
+                      prior_failed, chosen_type, chosen_model=""):
     """The decision-relevant half of a tier log row, in ONE place.
 
     `enforce_deny_tier`, `tier_rewrite_target` and `tier_surface` all read an
@@ -147,6 +147,7 @@ def tier_entry_fields(verdict, task_kind, task_kind_confidence, margin,
         "margin": margin,
         "rung_diff": verdict.get("rung_diff"),
         "chosen_type": chosen_type,
+        "chosen_model": chosen_model,
         "task_kind": task_kind,
         "task_kind_confidence": task_kind_confidence,
         "prior_failed": prior_failed,
@@ -246,6 +247,8 @@ def tier_rewrite_target(tier_entry):
 
       - fable dispatched WITH a stated prior failed attempt (the human has
         given the reason the ladder asks for; a downgrade would ignore it),
+      - a dispatch with a `model` set, because a new subagent_type would leave
+        that model in force and save nothing,
       - an entry that was not actually over-tiered (rung_diff < 1), an
         `unclear` task_kind, or one below the stricter rewrite bar,
       - a target rung with no dispatchable name on this machine's ladder, a
@@ -255,6 +258,8 @@ def tier_rewrite_target(tier_entry):
     entry = tier_entry or {}
     chosen_type = entry.get("chosen_type") or ""
     if chosen_type == "fable" and (entry.get("prior_failed") or 0.0) >= 0.5:
+        return None
+    if entry.get("chosen_model"):
         return None
     rung_diff = entry.get("rung_diff")
     if rung_diff is None or rung_diff < 1:

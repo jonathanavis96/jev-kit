@@ -149,27 +149,125 @@ def shell_words(command):
 # A heredoc delimiter is any word, not an identifier: bash takes `~EOF` in
 # `cat <<~EOF` as the literal delimiter `~EOF` (it has no strip-tabs `<<~`
 # form; that is zsh). Rejecting it left the body unstripped and its lines
-# read as commands (review finding, PR #1).
+# read as commands (review finding, PR #1). Quotes and backslashes anywhere in
+# the word are removed to get the terminator: `<<\EOF`, `<<E"O"F` and `<<'E'OF`
+# all end at a line reading EOF.
 # `(?<!<)` and `(?!<)` keep a here-string (`<<<word`) out: it feeds one word
 # and opens no body, so the lines after it are commands.
 _HEREDOC_RE = re.compile(
-    r"""(?<!<)<<(-?)[ \t]*(?!<)(?:'([^']*)'|"([^"]*)"|((?:\\.|[^\s;&|<>()'"])+))""")
+    r"""(?<!<)<<(-?)[ \t]*(?!<)((?:'[^']*'|"[^"]*"|\\.|[^\s;&|<>()'"\\])+)""")
+_DELIMITER_PART_RE = re.compile(r"""'([^']*)'|"([^"]*)"|\\(.)""")
+
+# Characters after which an unquoted `#` starts a word, and so a comment.
+COMMENT_AFTER = frozenset(" \t\n;&|()")
 
 
-def _heredoc_delimiters(line):
-    """The heredoc delimiters opened on `line`, as (delimiter, dashed)."""
-    found = []
-    for match in _HEREDOC_RE.finditer(line):
-        # A `<<` inside a quoted argument opens no heredoc.
-        if _inside_quotes(line, match.start()):
-            continue
-        delim = match.group(2) or match.group(3) or match.group(4)
-        if delim:
-            found.append((delim, match.group(1) == "-"))
-    return found
+def _delimiter_text(word):
+    """The terminator a heredoc word stands for, with its quoting removed."""
+    return _DELIMITER_PART_RE.sub(lambda m: m.group(1) or m.group(2) or m.group(3) or "", word)
 
 
-def strip_heredocs(command):
+class _HeredocScan:
+    """Quote, comment, `$(` and `$((` state carried from line to line.
+
+    A `<<` opens a body only when the shell would read it as the operator, and
+    whether it does can depend on an earlier line: a quote may still be open,
+    and `$(` starts a fresh quoting context inside a double-quoted string, which
+    is how `git commit -m "$(cat <<'EOF'` works."""
+
+    def __init__(self):
+        self.outer = []  # one [quote outside, plain parens open] per open `$(`
+        self.quote = None
+        self.arith = 0
+
+    def feed(self, line):
+        """The (delimiter, dashed) pairs of the heredocs `line` opens."""
+        found = []
+        i = 0
+        escaped_to = -1
+        n = len(line)
+        while i < n:
+            ch = line[i]
+            if self.quote == "'":
+                if ch == "'":
+                    self.quote = None
+            elif ch == "\\":
+                i += 2
+                escaped_to = i
+                continue
+            elif line.startswith("$((", i):
+                self.arith += 1
+                i += 3
+                continue
+            elif self.arith and line.startswith("))", i):
+                self.arith -= 1
+                i += 2
+                continue
+            elif line.startswith("$(", i):
+                self.outer.append([self.quote, 0])
+                self.quote = None
+                i += 2
+                continue
+            elif ch == '"':
+                self.quote = None if self.quote == '"' else '"'
+            elif self.quote is None:
+                if ch == "'":
+                    self.quote = "'"
+                elif ch == "(" and self.outer:
+                    self.outer[-1][1] += 1
+                elif ch == ")" and self.outer:
+                    if self.outer[-1][1]:
+                        self.outer[-1][1] -= 1
+                    else:
+                        self.quote = self.outer.pop()[0]
+                elif (ch == "#" and not self.arith and i != escaped_to
+                      and (i == 0 or line[i - 1] in COMMENT_AFTER)):
+                    break  # an apostrophe or `<<` in a comment changes nothing
+                elif ch == "<" and not self.arith:
+                    match = _HEREDOC_RE.match(line, i)
+                    if match:
+                        found.append((_delimiter_text(match.group(2)), match.group(1) == "-"))
+                        i = match.end()
+                        continue
+                    if line.startswith("<<<", i):
+                        i += 3
+                        continue
+            i += 1
+        return found
+
+
+def _split_heredocs(command, keep_unterminated=False):
+    """(kept lines, [(opening line, body text)]). A body whose terminator never
+    appears runs to the end of the input, as it does in bash, unless
+    `keep_unterminated` asks for those lines to stay."""
+    lines = str(command).split("\n")
+    kept = []
+    bodies = []
+    scan = _HeredocScan()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        i += 1
+        for delim, dashed in scan.feed(line):
+            if not delim:
+                continue
+            end = i
+            while end < len(lines):
+                probe = lines[end].lstrip("\t") if dashed else lines[end]
+                if probe.rstrip("\r") == delim:
+                    break
+                end += 1
+            if end == len(lines):
+                if keep_unterminated:
+                    kept.extend(lines[i:])
+                return kept, bodies
+            bodies.append((line, "\n".join(lines[i:end])))
+            i = end + 1
+    return kept, bodies
+
+
+def strip_heredocs(command, keep_unterminated=False):
     """`command` with every heredoc BODY removed, the opening line kept.
 
     A heredoc body is data, never commands: `cat <<EOF` followed by a line
@@ -178,44 +276,23 @@ def strip_heredocs(command):
     word `es` in documentation or a test fixture read as an indexed search
     and suppressed the deny for a real crawl in the same command (review
     finding, PR #1).
+
+    `keep_unterminated` is for a caller that looks for commands to stop. There,
+    a `<<` this scan took for a heredoc but the shell did not (`((x<<2))`,
+    `let y=1<<3`) must not hide every line after it, and a body nobody closes
+    is rare enough to read as code.
     """
     if not command or "<<" not in command:
         return command
-    lines = str(command).split("\n")
-    kept = []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        kept.append(line)
-        i += 1
-        for delim, dashed in _heredoc_delimiters(line):
-            while i < len(lines):
-                body = lines[i]
-                i += 1
-                probe = body.lstrip("\t") if dashed else body
-                if probe.rstrip("\r") == delim:
-                    break
-    return "\n".join(kept)
+    return "\n".join(_split_heredocs(command, keep_unterminated)[0])
 
 
-def _inside_quotes(text, index):
-    """Is `text[index]` inside a single- or double-quoted run?"""
-    quote = None
-    escaped = False
-    for pos, char in enumerate(text):
-        if pos >= index:
-            break
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\" and quote != "'":
-            escaped = True
-            continue
-        if quote is None and char in "'\"":
-            quote = char
-        elif char == quote:
-            quote = None
-    return quote is not None
+def heredoc_bodies(command):
+    """[(opening line, body text)] for each terminated heredoc in `command`.
+    For the one case where a body is code: a shell reading it on stdin."""
+    if not command or "<<" not in command:
+        return []
+    return _split_heredocs(command)[1]
 
 
 def shell_segments(command):

@@ -8,14 +8,14 @@ request, no log row, no subprocess.
 
 | id | tools | default | decided by | what it is for |
 |---|---|---|---|---|
-| `R1-secret-exposure` | Bash, Read | deny | code, Jev for an ambiguous path | reading or echoing a secret into the transcript |
+| `R1-secret-exposure` | Bash, Read | deny | code, Jev for an ambiguous path | reading or echoing a secret into the transcript, also inside a subshell, a substitution, `eval`, or a script handed to a shell |
 | `R2-claude-api-skill` | Skill | deny (warn with no stated purpose) | Jev | loading a 324,006-token reference for a price lookup |
 | `R3-whole-suite-or-uncapped-build` | Bash | warn | code only | the whole test suite, or a build with uncapped parallelism |
 | `R4-long-work-bare-shell` | Bash | warn | code, Jev for the ambiguous cases | long work on a shell a dropped connection would kill |
 | `R5-sudo` | Bash | deny | code only | `sudo` outside a named package install, or anywhere under `$HOME` |
 | `R6-gui-or-browser` | Bash | **`off` by default on every platform** | code only | opening a GUI or browser on a headless box |
 | `R7-destructive` | Bash | warn | code only | force pushes, hard resets, wholesale deletion (`rm -rf` of `/`, `~` or `.`, recursive `rm` behind `find -exec` or `xargs`), SQL `DROP`, `redis-cli FLUSHALL`, `terraform destroy`, `dd` onto a device, recursive `chmod`/`chown` of `/` or `~`, a download piped into a shell |
-| `R7-root-delete` | Bash | deny | code only | `rm -r` of `/`, `/*`, `~`, `~/*` or `$HOME`, behind any wrapper, past `sudo` and its options, and inside `sh -c` |
+| `R7-root-delete` | Bash | deny | code only | `rm -r` of `/`, `/*`, `~`, `~/*` or `$HOME`, behind any wrapper, past `sudo` and its options, and wherever a shell is handed the code: `sh -c`, `eval`, a substitution, a heredoc or here-string into a shell, or a pipe from `echo` or `printf` |
 | `R8-tier-guard` | Agent | deny two rungs over, **warn one rung over**, rewrite only if asked | Jev | a task dispatched to an agent more expensive than it needs |
 | `R8-tool-choice-guard` | Bash | deny | Jev | a disk-wide filename crawl, or a raw grep where a code graph exists |
 | `R9-commit-secret` | Bash | deny | code + a local credential belt | staging or committing a secret |
@@ -72,6 +72,11 @@ ask. That was verified against Claude Code 2.1.272, not assumed.
 The guard asks Jev one question about an `Agent` dispatch: what kind of task
 this really is. It compares the answer to the rung that was chosen, and the gap
 decides what happens.
+
+When the call sets `model`, the model picks the rung, so `developer` on `sonnet`
+is judged as `workerS`. A `tiers.json` may list model names as rung members. A
+rewrite never touches such a call, because the new type would run on the same
+model.
 
 | gap | what happens |
 |---|---|
