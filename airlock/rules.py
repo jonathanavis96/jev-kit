@@ -344,6 +344,12 @@ def split_segments_ops(command):
             newline = command.find("\n", i)
             i = n if newline == -1 else newline
             continue
+        if ch == "\\" and command[i + 1:i + 2] == "\n" and quote != "'":
+            # A line continuation: bash removes the pair, outside quotes and
+            # inside double quotes alike. Kept, it left a lone `\` as the
+            # program of `a &&\<newline>sudo rm -rf /etc` and hid the command.
+            i += 2
+            continue
         if quote:
             buf.append(ch)
             if ch == "\\" and quote == '"' and i + 1 < n:
@@ -991,6 +997,18 @@ def _secret_path_in(tokens):
     return None
 
 
+def _spaced_quoted_words(seg):
+    """Quoted words holding whitespace, unquoted. `words()` splits on spaces
+    inside quotes too, so `cat "/home/u/My Project/.env"` reached the path
+    patterns as `"/home/u/My` and `Project/.env"`, and neither matched."""
+    out = []
+    for m in _QUOTED_RE.finditer(seg or ""):
+        body = m.group(0)[1:-1]
+        if any(c.isspace() for c in body):
+            out.append(body)
+    return out
+
+
 def _key_file_paths():
     """Every path the key can live at on this machine. Never raises."""
     found = []
@@ -1310,7 +1328,8 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in READERS or _windows_reader(prog):
             if prog in ("grep", "egrep", "rg", "ag") and _quiet_grep(args):
                 continue
-            hit = _secret_path_in(args) or _key_file_from(args, cwd)
+            hit = (_secret_path_in(args) or _secret_path_in(_spaced_quoted_words(seg))
+                   or _key_file_from(args, cwd))
             if hit:
                 return Match(
                     "`%s` on a secret store (%s) would print its contents" % (prog, hit),
