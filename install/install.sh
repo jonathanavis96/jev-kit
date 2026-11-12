@@ -763,6 +763,14 @@ fi
 if [ "$WANT_BELAY" = "1" ]; then
   step "Belay"
   "$REPO_ROOT/belay/install.sh" || warn "belay/install.sh reported a problem"
+  # The guard step wired settings.json before the belay wrapper existed, so
+  # _wire.py skipped the Stop hook then. Now that it is installed, wire again:
+  # _wire.py is idempotent, so this adds the Stop hook and nothing else.
+  if [ "$WANT_GUARD" = "1" ] && [ "${#WIRE_FILES[@]}" -gt 0 ]; then
+    JEV_HOME="$AIRLOCK_HOME" AIRLOCK_HOME="$AIRLOCK_HOME" AIRLOCK_PYTHON3="$PY" \
+      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}" \
+      || warn "wiring the belay Stop hook reported a problem"
+  fi
 fi
 
 if [ "$WANT_COMPACTION" = "1" ]; then
