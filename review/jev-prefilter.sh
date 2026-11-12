@@ -43,8 +43,10 @@ EXTRA=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --repo) REPO="${2:-}"; [ -n "$REPO" ] || usage; shift 2 ;;
-    --gate) GATE="${2:-}"; shift 2 ;;
-    --max-findings) MAX_FINDINGS="${2:-5}"; shift 2 ;;
+    # `shift 2` with only one argument left fails without shifting, so a
+    # trailing --gate or --max-findings would loop here forever.
+    --gate) [ "$#" -ge 2 ] || usage; GATE="$2"; shift 2 ;;
+    --max-findings) [ "$#" -ge 2 ] || usage; MAX_FINDINGS="$2"; shift 2 ;;
     --print) PRINT_ONLY=1; shift ;;
     --) shift; EXTRA=("$@"); break ;;
     -h|--help) usage ;;
@@ -75,8 +77,13 @@ run_review() {
     return 1
   fi
 
+  # Absolute before the cd below: a relative --repo would otherwise name a
+  # path inside the jev-review clone.
+  local repo_abs
+  repo_abs="$(cd "$REPO" && pwd)" || { warn "cannot resolve $REPO"; return 1; }
+
   raw="$(cd "$REVIEW_DIR" && PATH="$node_bin:$PATH" \
-        timeout "$TIMEOUT_S" npm run --silent review:changes -- "$REPO" 2>/dev/null)" || {
+        timeout "$TIMEOUT_S" npm run --silent review:changes -- "$repo_abs" 2>/dev/null)" || {
     warn "review:changes failed or timed out after ${TIMEOUT_S}s"
     return 1
   }
@@ -84,8 +91,9 @@ run_review() {
   return 0
 }
 
-summarise() {
-  MAX_FINDINGS="$MAX_FINDINGS" REPO="$REPO" python3 - <<'PY' 2>/dev/null
+# The script goes in through -c, not `python3 - <<'PY'`: a heredoc on stdin
+# would replace the piped review JSON, and summarise would always read "".
+SUMMARISE_PY="$(cat <<'PY'
 import json, os, sys
 
 raw = sys.stdin.read()
@@ -140,6 +148,10 @@ else:
 
 print("\n".join(lines))
 PY
+)"
+
+summarise() {
+  MAX_FINDINGS="$MAX_FINDINGS" REPO="$REPO" python3 -c "$SUMMARISE_PY" 2>/dev/null
 }
 
 if run_review; then
