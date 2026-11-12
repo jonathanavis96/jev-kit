@@ -551,6 +551,23 @@ class TestSessionCheckOnWindows(WireTestBase):
         self.assertEqual(Path(path).read_text(), before)
 
 
+class TestOneBadFile(WireTestBase):
+    def test_an_unwritable_file_is_reported_and_the_rest_still_wired(self):
+        blocker = self._file("not a directory")
+        bad = os.path.join(blocker, "settings.json")
+        good = self._missing_path()
+        self.addCleanup(lambda: os.path.exists(good) and os.unlink(good))
+        env = dict(os.environ, NEW_HOOK=NEW_HOOK, NEW_HOOK_COMMAND=NEW_HOOK_COMMAND,
+                   APPLY="1", BELAY="0", FUNCTION_HOOKS="0", SESSION_CHECK="0",
+                   BROWSE_UNLOCK="0")
+        proc = subprocess.run([sys.executable, str(WIRE), bad, good],
+                              capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("could not wire", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertTrue(os.path.exists(good))
+
+
 class TestBrowseUnlockEntry(WireTestBase):
     """The PostToolUse browse-unlock entry: added, repointed, idempotent, and
     never merged into a matcher="*" block. It is the only hook here with a

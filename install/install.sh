@@ -588,7 +588,8 @@ EOF
     [ "$WANT_BELAY" = "1" ] && WIRE_EXTRA_FLAGS+=("--belay")
     [ "$WANT_SESSION_CHECK" = "1" ] || WIRE_EXTRA_FLAGS+=("--no-session-check")
     AIRLOCK_HOME="$AIRLOCK_HOME" JEV_HOME="$AIRLOCK_HOME" AIRLOCK_PYTHON3="$PY" \
-      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}"
+      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}" \
+      || warn "wire.sh could not edit every settings.json (see above); the guard is not wired there"
   else
     echo "   No --wire given, so no settings.json was touched. To preview an edit"
     echo "   to an existing entry:"

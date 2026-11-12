@@ -634,9 +634,17 @@ def main():
     if not paths:
         print("no settings.json paths given", file=sys.stderr)
         return 2
+    # One file that cannot be read or written must not stop the others, and
+    # must not look like success: it is reported, and the exit status is 1.
+    failed = False
     for path in paths:
-        process(path)
-    return 0
+        try:
+            process(path)
+        except Exception as exc:
+            failed = True
+            print("%s: could not wire (%s: %s), left as it was"
+                  % (path, type(exc).__name__, exc), file=sys.stderr)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
