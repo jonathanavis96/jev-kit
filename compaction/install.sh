@@ -92,7 +92,10 @@ fi
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
   KEY_FILE="$(airlock_key_file)"
   if [ -r "$KEY_FILE" ]; then
-    TYPESAFE_API_KEY="$(sed -n 's/^ *\(export \)\?TYPESAFE_API_KEY=//p' "$KEY_FILE" | head -1)"
+    # Surrounding whitespace and one pair of matching quotes are dropped, as
+    # airlock/keyfile.py does: KEY="abc" is the key abc, not "abc".
+    TYPESAFE_API_KEY="$(sed -n 's/^ *\(export \)\?TYPESAFE_API_KEY=//p' "$KEY_FILE" | head -1 \
+      | sed "s/^[[:space:]]*//; s/[[:space:]]*\$//; s/^\"\(.*\)\"\$/\1/; s/^'\(.*\)'\$/\1/")"
   fi
 fi
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
