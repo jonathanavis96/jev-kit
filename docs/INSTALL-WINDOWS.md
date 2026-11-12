@@ -254,7 +254,8 @@ There are three moving parts instead:
 
 3. **`airlock-hook.py`**, a small stable launcher in the install root.
    `settings.json` points **here**, never at a release directory. It resolves
-   `current` (junction first, then `current.txt`) and runs the real hook **in
+   the release (`current.txt` first, since that is what a rollback edits,
+   then the junction) and runs the real hook **in
    the same process**, so the indirection costs one small file read rather
    than a second interpreter start-up.
 

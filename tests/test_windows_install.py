@@ -242,6 +242,25 @@ class TestInstallerEndToEnd(unittest.TestCase):
         self.assertIsNotNone(resolved)
         self.assertTrue(os.path.isfile(os.path.join(resolved, "hooks", "airlock.py")))
 
+    def test_a_rollback_in_current_txt_wins_over_the_junction(self):
+        """The documented rollback is one edit of current.txt. Read after the
+        junction, it changed nothing on a machine that had a junction."""
+        home = os.path.join(self.tmp, "home")
+        old_release = os.path.join(home, "releases", "old")
+        new_release = os.path.join(home, "current")  # stands in for the junction
+        os.makedirs(old_release)
+        os.makedirs(new_release)
+        with open(os.path.join(home, "current.txt"), "w") as f:
+            f.write(old_release + "\n")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertEqual(wc.resolve_current(), old_release)
+        ns = {"__file__": os.path.join(home, "airlock-hook.py")}
+        exec(compile(wc.LAUNCHER_SOURCE.replace('if __name__ == "__main__":', "if False:"),
+                     "launcher", "exec"), ns)
+        self.assertEqual(ns["_release_root"](), old_release)
+        os.remove(os.path.join(home, "current.txt"))
+        self.assertEqual(ns["_release_root"](), new_release)
+
     def test_the_release_copy_leaves_the_repository_noise_behind(self):
         self._install()
         with open(os.path.join(self.tmp, "home", "current.txt")) as f:
