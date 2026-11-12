@@ -126,6 +126,11 @@ class TestRedact(unittest.TestCase):
         out = redact.redact("SOME_API_KEY=xyz987fooBAR")
         self.assertNotIn("xyz987fooBAR", out)
 
+    def test_spaces_around_the_equals_sign(self):
+        for text in ("SOME_API_KEY = xyz987fooBAR", "MY_SECRET =xyz987fooBAR",
+                     'GITHUB_TOKEN = "xyz987fooBAR"'):
+            self.assertNotIn("xyz987fooBAR", redact.redact(text), text)
+
     def test_bare_hex_32(self):
         hexstr = "a" * 40
         out = redact.redact("token: %s end" % hexstr)
