@@ -278,5 +278,25 @@ class TestModeDispatch(unittest.TestCase):
             resolve_mode.assert_not_called()
 
 
+    def test_utf8_payload_read_through_a_code_page_stdin_is_still_judged(self):
+        """Native Windows decodes a piped stdin with the ANSI code page. A
+        UTF-8 payload holding a byte cp1252 leaves undefined (0x81 in 'Á')
+        used to raise in read() and the hook skipped the call unjudged."""
+        import io
+        payload = json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": "grep -r \u00c1 ."}},
+            ensure_ascii=False).encode("utf-8")
+        fake_stdin = io.TextIOWrapper(io.BytesIO(payload), encoding="cp1252")
+        with mock.patch("sys.stdin", fake_stdin), \
+             mock.patch.object(hook_entry, "_disabled", return_value=False), \
+             mock.patch.object(hook_entry, "_resolve_mode", return_value="enforce"):
+            from airlock import enforce as enforce_mod
+            with mock.patch.object(enforce_mod, "handle", return_value=False) as handle:
+                hook_entry.main()
+                handle.assert_called_once()
+                self.assertEqual(handle.call_args[0][0]["tool_input"]["command"],
+                                 "grep -r \u00c1 .")
+
+
 if __name__ == "__main__":
     unittest.main()
