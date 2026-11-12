@@ -96,6 +96,7 @@ class Child:
             env=env,
         )
         self.requests_served = 0
+        self.retired = False
         self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -126,6 +127,8 @@ class Child:
         """Send one message, block for the matching result event. Caller
         must retire this child on any exception here."""
         with self._lock:
+            if self.retired:
+                raise _ChildRetired("standing claude child was retired while this request waited")
             stdin = self.proc.stdin
             if stdin is None:
                 raise RuntimeError("standing claude child has no stdin pipe")
@@ -133,7 +136,7 @@ class Child:
             try:
                 stdin.write(line + "\n")
                 stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+            except (BrokenPipeError, OSError, ValueError) as exc:
                 raise RuntimeError(f"standing claude child stdin closed: {exc}") from None
             try:
                 event = self._queue.get(timeout=timeout)
@@ -159,6 +162,10 @@ class Child:
                 self.proc.wait(timeout=3)
             except Exception:
                 logger.warning("child pid %s (model %s) could not be reaped", self.proc.pid, self.cli_model)
+
+
+class _ChildRetired(RuntimeError):
+    """The child this request queued on was retired before its turn came."""
 
 
 class ModelPool:
@@ -189,6 +196,7 @@ class ModelPool:
             return self._children[self._idx]
 
     def _retire(self, child: Child):
+        child.retired = True
         with self._lock:
             if child in self._children:
                 self._children.remove(child)
@@ -196,13 +204,24 @@ class ModelPool:
         _TRACKED_CHILDREN.discard(child)
 
     def request(self, prompt: str, timeout: float) -> dict:
-        child = self._pick()
-        try:
-            event = child.request(prompt, timeout=timeout)
-        except (TimeoutError, RuntimeError) as exc:
-            logger.warning("child pid=%s failed (%s); retiring", child.proc.pid, exc)
-            self._retire(child)
-            raise
+        # Requests queue on a child's lock. When one of them recycles or
+        # retires that child, the others waiting on it move to another child
+        # instead of failing: the child going away is not their fault.
+        for _attempt in range(3):
+            child = self._pick()
+            try:
+                event = child.request(prompt, timeout=timeout)
+            except _ChildRetired:
+                continue
+            except (TimeoutError, RuntimeError) as exc:
+                if child.retired:
+                    continue
+                logger.warning("child pid=%s failed (%s); retiring", child.proc.pid, exc)
+                self._retire(child)
+                raise
+            break
+        else:
+            raise RuntimeError("no standing claude child could take the request")
         if child.requests_served >= RECYCLE_AFTER:
             logger.info("recycling child pid=%s after %d requests", child.proc.pid, child.requests_served)
             self._retire(child)
