@@ -332,7 +332,17 @@ fi
 install_unit() {
   local src="$1" name="$2"
   mkdir -p "$UNIT_DIR"
-  install -m 644 "$src" "$UNIT_DIR/$name"
+  # The unit files name the default home (%h/.local/share/airlock). A custom
+  # AIRLOCK_HOME deploys elsewhere, so it is written into the installed copy;
+  # otherwise the unit would run whatever the default path holds, or nothing.
+  local default_home="%h/.local/share/airlock" content
+  if [ "$AIRLOCK_HOME" != "$HOME/.local/share/airlock" ]; then
+    content="$(cat "$src")"
+    printf '%s\n' "${content//"$default_home"/"$AIRLOCK_HOME"}" > "$UNIT_DIR/$name"
+    chmod 644 "$UNIT_DIR/$name"
+  else
+    install -m 644 "$src" "$UNIT_DIR/$name"
+  fi
   ok "unit $name -> $UNIT_DIR"
 }
 
