@@ -132,5 +132,35 @@ class TestApplyCriteriaReplacement(unittest.TestCase):
         self.assertEqual(len(seed_ids_in_merged), 390)
 
 
+    def test_merge_new_cases_keeps_every_curated_source_when_capping(self):
+        curated = [{"id": "w-%d" % i, "guard": "tool_choice_guard", "source": "seed-widening",
+                    "payload": {"tool_input": {"command": "cmd-%d" % i}}} for i in range(390)]
+        new = [{"id": "shadow-%d" % i, "guard": "tool_choice_guard", "source": "shadow",
+                "payload": {"tool_input": {"command": "newcmd-%d" % i}}} for i in range(20)]
+        merged = tune.merge_new_cases(curated, new)
+        self.assertLessEqual(len(merged), tune.MAX_CASES)
+        self.assertEqual(len([c for c in merged if c["source"] == "seed-widening"]), 390)
+
+    def test_tier_shadow_row_becomes_a_case_the_eval_can_read(self):
+        row = {"guard": "tier_guard", "input_summary": {
+            "subagent_type": "workerSM", "model_override": "opus",
+            "description": "d", "prompt_head": "rename the variable"}}
+        ti = tune.case_tool_input(row, "tier_guard")
+        self.assertEqual(ti["prompt"], "rename the variable")
+        self.assertEqual(ti["model"], "opus")
+        other = dict(row, input_summary=dict(row["input_summary"], prompt_head="write the parser"))
+        a = {"guard": "tier_guard", "payload": {"tool_input": ti}}
+        b = {"guard": "tier_guard", "payload": {"tool_input": tune.case_tool_input(other, "tier_guard")}}
+        self.assertNotEqual(tune.normalize_key(a), tune.normalize_key(b))
+
+    def test_subset_accuracy_reads_only_the_named_cases(self):
+        results = [{"id": "old-1", "label_correct": True},
+                   {"id": "old-2", "label_correct": False},
+                   {"id": "old-3", "ambiguous": True, "label_correct": None},
+                   {"id": "old-4", "error": "x"},
+                   {"id": "new-1", "label_correct": False}]
+        self.assertEqual(tune.subset_accuracy(results, {"old-1", "old-2", "old-3", "old-4"}), 0.5)
+        self.assertEqual(tune.subset_accuracy(results, set()), 0.0)
+
 if __name__ == "__main__":
     unittest.main()

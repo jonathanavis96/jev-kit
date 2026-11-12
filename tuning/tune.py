@@ -951,6 +951,24 @@ def apply_criteria_replacement(source, replacements):
 # --- case dedupe / capping -------------------------------------------------
 
 
+def case_tool_input(row, guard):
+    """The tool_input an eval case replays, from a shadow row's input_summary.
+
+    The tier guard logs the prompt as `prompt_head` and the model as
+    `model_override`, but the eval and normalize_key read `prompt` and
+    `model`. Copied as-is, every tier case judged an empty prompt and all of
+    them for one subagent_type deduplicated to a single case."""
+    ti = dict(row.get("input_summary") or {})
+    if guard == "tier_guard":
+        if "prompt" not in ti and "prompt_head" in ti:
+            ti["prompt"] = ti.pop("prompt_head")
+        if "model" not in ti and "model_override" in ti:
+            model = ti.pop("model_override")
+            if model:
+                ti["model"] = model
+    return ti
+
+
 def normalize_key(case):
     payload = case.get("payload") or {}
     ti = payload.get("tool_input") or {}
@@ -990,9 +1008,12 @@ def merge_new_cases(existing_cases, new_cases):
         merged.append(c)
 
     if len(merged) > MAX_CASES:
-        # Drop oldest shadow cases first; never drop seed cases.
-        seeds = [c for c in merged if c.get("source") == "seed"]
-        shadows = [c for c in merged if c.get("source") != "seed"]
+        # Drop oldest shadow cases first; never drop a hand-curated case.
+        # Only "shadow" cases are written by this loop: the curated sets carry
+        # other sources too ("seed-widening", "r10-general-risk", ...), and
+        # protecting "seed" alone let the cap delete those first.
+        seeds = [c for c in merged if c.get("source") != "shadow"]
+        shadows = [c for c in merged if c.get("source") == "shadow"]
         keep_shadow_count = max(0, MAX_CASES - len(seeds))
         shadows = shadows[-keep_shadow_count:] if keep_shadow_count else []
         merged = seeds + shadows
@@ -1002,9 +1023,10 @@ def merge_new_cases(existing_cases, new_cases):
 # --- eval invocation (real Jev calls) --------------------------------------
 
 
-def run_eval_in_worktree(cases_path=None):
+def run_eval_in_worktree(cases_path=None, with_results=False):
     """Run airlock.eval inside the worktree's own venv-less interpreter,
-    with the worktree on sys.path first, and return the parsed summary."""
+    with the worktree on sys.path first, and return the parsed summary
+    (and the per-case results too, when `with_results`)."""
     cmd = [sys.executable, "-m", "airlock.eval", "--json"]
     if cases_path:
         cmd += ["--cases", str(cases_path)]
@@ -1016,7 +1038,24 @@ def run_eval_in_worktree(cases_path=None):
     result_file = WORKTREE_DIR / "eval" / "last_result.json"
     with open(result_file) as f:
         data = json.load(f)
+    if with_results:
+        return data["summary"], data.get("results") or []
     return data["summary"]
+
+
+def subset_accuracy(results, ids):
+    """Label accuracy over the scored cases whose id is in `ids`: the same
+    count airlock.eval's summary makes (errors and ambiguous cases left out),
+    restricted to one set of cases, so a before and an after figure on the
+    same cases can be compared."""
+    correct = scored = 0
+    for r in results:
+        if r.get("id") not in ids or "error" in r or r.get("ambiguous"):
+            continue
+        scored += 1
+        if r.get("label_correct"):
+            correct += 1
+    return (correct / scored) if scored else 0.0
 
 
 def overall_accuracy(summary):
@@ -1278,7 +1317,7 @@ def main():
                 "session_id": row.get("session_id"),
                 "cwd": row.get("cwd"),
                 "tool_name": row.get("tool_name"),
-                "tool_input": row.get("input_summary") or {},
+                "tool_input": case_tool_input(row, guard),
             },
             "expected": expected,
             "source": "shadow",
@@ -1302,8 +1341,13 @@ def main():
     write_cases(cases_path, merged_cases)
     tokens_jev = 0
     try:
-        before_summary = run_eval_in_worktree()
+        before_summary, before_results = run_eval_in_worktree(with_results=True)
         acc_before, false_deny_before = overall_accuracy(before_summary)
+        # The regression check below compares the cases that existed before
+        # this run, before and after. The merged-set figure above includes
+        # the new cases, every one of which the guard just got wrong, so it
+        # is lower and let a real regression on the old cases pass.
+        acc_before_on_old = subset_accuracy(before_results, baseline_ids)
         tokens_jev += sum(s.get("total_tokens", 0) for s in before_summary.values())
     except Exception as exc:
         log("baseline eval failed: %s" % exc)
@@ -1371,19 +1415,14 @@ def main():
         return 0
 
     try:
-        after_summary = run_eval_in_worktree()
+        after_summary, after_results = run_eval_in_worktree(with_results=True)
         acc_after, false_deny_after = overall_accuracy(after_summary)
         tokens_jev += sum(s.get("total_tokens", 0) for s in after_summary.values())
 
-        # Re-run restricted to the previously-existing case ids to check for
-        # a regression on cases that already existed before this run.
-        subset_cases = [c for c in merged_cases if c.get("id") in baseline_ids]
-        subset_path = WORKTREE_DIR / "eval" / "_tune_subset_cases.jsonl"
-        write_cases(subset_path, subset_cases)
-        subset_summary = run_eval_in_worktree(cases_path=subset_path)
-        acc_after_on_old, _ = overall_accuracy(subset_summary)
-        tokens_jev += sum(s.get("total_tokens", 0) for s in subset_summary.values())
-        subset_path.unlink(missing_ok=True)
+        # The cases that existed before this run, scored the same way as
+        # acc_before_on_old. Each case is judged on its own, so reading them
+        # out of the full run equals a separate run over just those cases.
+        acc_after_on_old = subset_accuracy(after_results, baseline_ids)
     except Exception as exc:
         log("post-change eval failed: %s" % exc)
         worktree_discard_changes()
@@ -1395,16 +1434,16 @@ def main():
         return 0
 
     gate_ok = (
-        acc_after_on_old >= acc_before
+        acc_after_on_old >= acc_before_on_old
         and acc_after > acc_before
         and false_deny_after <= false_deny_before
     )
 
     if not gate_ok:
         log(
-            "gate failed: acc_before=%.3f acc_after=%.3f acc_after_on_old=%.3f "
+            "gate failed: acc_before=%.3f acc_after=%.3f acc_before_on_old=%.3f acc_after_on_old=%.3f "
             "false_deny_before=%d false_deny_after=%d"
-            % (acc_before, acc_after, acc_after_on_old, false_deny_before, false_deny_after)
+            % (acc_before, acc_after, acc_before_on_old, acc_after_on_old, false_deny_before, false_deny_after)
         )
         worktree_discard_changes()
         state["last_processed_ts"] = newest_ts
@@ -1412,7 +1451,8 @@ def main():
         _finish(state, interval_min, committed=False, new_rows=len(new_rows), judged=judged_count, wrong=wrong_count,
                 error_rate=error_rate, accuracy_before=acc_before, accuracy_after=acc_after, tokens_jev=tokens_jev,
                 wall_s=time.time() - run_start,
-                reason="gate failed: before=%.3f after=%.3f after_on_old=%.3f" % (acc_before, acc_after, acc_after_on_old),
+                reason="gate failed: before=%.3f after=%.3f before_on_old=%.3f after_on_old=%.3f"
+                % (acc_before, acc_after, acc_before_on_old, acc_after_on_old),
                 category=CATEGORY_RAN_REJECTED, redaction_skipped=redaction_skipped)
         return 0
 
