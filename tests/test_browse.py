@@ -248,6 +248,8 @@ class TestArguments(unittest.TestCase):
         self.assertLessEqual(len(text.encode("utf-8")), 8192)
         self.assertEqual(text, "é" * 4096)
         self.assertEqual(server.trim_text("short"), ("short", False))
+        self.assertEqual(server.trim_text("a\ud800b"), ("a\ud800b", False))
+        self.assertEqual(server.trim_text("\ud800" * 10, limit=4), ("????", True))
         self.assertEqual(server.trim_text(None), ("", False))
 
 
@@ -828,6 +830,14 @@ class TestTheWorkerLifecycle(CallCase):
         self.assertEqual(self.started[0].stopped, 1)
         self.assertEqual(len(self.started), 1, "stopping is not worth a new worker")
         self.browse.chromium.close.assert_called_once_with()
+
+    def test_shutdown_after_an_interrupted_call_uses_a_fresh_worker(self):
+        call(self.srv, goal="open https://example.com")
+        self.started[0].busy = True  # SIGTERM arrived while it was working
+        self.browse.shutdown()
+        self.assertEqual(self.started[0].stopped, 1)
+        self.assertNotIn({"op": "stop_daemon"}, self.started[0].asked)
+        self.assertEqual(self.started[1].asked, [{"op": "stop_daemon"}])
 
     def test_the_text_model_defaults_to_the_warm_claude_child(self):
         with mock.patch.dict(os.environ), \

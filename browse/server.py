@@ -369,6 +369,10 @@ class Worker:
         self.calls = 0
         self._lines = queue.Queue()
         self._stderr = collections.deque(maxlen=self.STDERR_TAIL)
+        # True from a request going out until its answer is read. A call
+        # interrupted by SIGTERM leaves it set: the worker is still working on
+        # that request and would answer anything sent next only after it.
+        self.busy = False
         # The shared venv carries the dependencies, not jev_ultrafast itself,
         # so the child is told where the source is. cwd is not enough:
         # sys.path[0] is runner.py's own directory, which is this repo's
@@ -428,6 +432,7 @@ class Worker:
         BrowseTimeout, and the worker is dead by the time either is raised."""
         if not self.alive():
             raise BrowseError("the browser agent is not running. %s" % self.tail())
+        self.busy = True
         try:
             self.proc.stdin.write(json.dumps(request) + "\n")
             self.proc.stdin.flush()
@@ -443,6 +448,7 @@ class Worker:
                 "timed out after %.0f s (JEV_BROWSE_TIMEOUT). The agent was stopped; "
                 "try a narrower goal or a start_url closer to it." % timeout_s
             )
+        self.busy = False
         if message is None:
             returncode = self.proc.poll()
             self.stop()
@@ -813,7 +819,10 @@ def parse_arguments(args):
 
 
 def trim_text(text, limit=TEXT_LIMIT_BYTES):
-    raw = (text or "").encode("utf-8")
+    # "replace": page text can carry a lone surrogate (JSON allows "\ud800"),
+    # which strict UTF-8 refuses, and the whole call failed after the agent
+    # had already acted. Only the size test and the cut need the bytes.
+    raw = (text or "").encode("utf-8", "replace")
     if len(raw) <= limit:
         return text or "", False
     return raw[:limit].decode("utf-8", errors="ignore"), True
@@ -1089,6 +1098,16 @@ class Browse:
         return json.loads(scrub(json.dumps(out), secrets_of(key)))
 
     def shutdown(self):
+        # A call cut short by a signal leaves its worker mid-request. Sent
+        # there, stop_daemon would wait behind that request for its whole
+        # 10 s and the daemon would be left running, so that worker is stopped
+        # first and stop_daemon goes to a fresh one.
+        with self.lock:
+            busy = self.worker if getattr(self.worker, "busy", False) else None
+            if busy is not None:
+                self.worker = None
+        if busy is not None:
+            busy.stop()
         if self.daemon_used:
             # Stop the harness daemon whenever one may exist, whoever owns the
             # browser. It outlives an external browser we never close, so
