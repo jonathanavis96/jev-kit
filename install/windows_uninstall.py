@@ -122,7 +122,7 @@ def clean_settings(path, launcher, apply=True):
     if not os.path.isfile(path):
         return None
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except Exception as exc:
         return "not valid JSON (%s), refusing to touch it" % str(exc)[:120]
@@ -133,7 +133,7 @@ def clean_settings(path, launcher, apply=True):
         return "would remove %d hook entry(ies): %s" % (len(removed), ", ".join(
             str(c)[:80] for c in removed))
     saved = wc.backup(path)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, indent=2) + "\n")
     return "removed %d hook entry(ies); backed up to %s" % (len(removed), saved)
 

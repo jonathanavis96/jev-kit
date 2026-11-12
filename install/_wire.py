@@ -370,7 +370,7 @@ def _process_missing(path):
             print(line)
         return True
     data = _fresh_settings()
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, indent=2) + "\n")
     print("%s: did not exist, created with:" % path)
     for line in _describe_fresh():
@@ -441,7 +441,7 @@ def process(path):
     if not os.path.isfile(path):
         return _process_missing(path)
 
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         text = f.read()
 
     try:
@@ -542,7 +542,7 @@ def process(path):
                     print("    -> %s%s" % (prefix, target))
             return True
         backup = _backup(path)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(new_text)
         print("%s: backed up to %s, %d hook path(s) repointed (interpreter prefix kept)"
               % (path, backup, total))
@@ -612,7 +612,7 @@ def process(path):
         return True
 
     backup = _backup(path)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(new_text)
     print("%s: backed up to %s" % (path, backup))
     for a in actions:
