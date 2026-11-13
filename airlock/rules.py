@@ -2101,9 +2101,14 @@ _DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/
 # A download piped straight into a shell with no script argument, so the
 # shell runs whatever came down the wire. `curl page | bash norm.sh` hands the
 # page to a local script as stdin and is not this.
+#
+# A redirection such as `2>&1` is not a separator, `|&` pipes stderr too, and
+# a shell given `-s` reads its script from stdin whatever follows, so
+# `curl https://get.rvm.io | bash -s stable` is this as well.
 _PIPE_TO_SHELL_RE = re.compile(
-    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-[A-Za-z]*[ugpCUrtDRTh]\s+\S+\s+|--(?:user|group)\s+\S+\s+|-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
-    r"(?:\s+-[^\s-]\S*)*\s*(?:--?(?:\s|$)|$|[;&|\n)])"
+    r"\b(curl|wget)\b(?:[<>]&|[^|;&\n])*\|&?\s*(?:(?:\S*/)?sudo\s+(?:-[A-Za-z]*[ugpCUrtDRTh]\s+\S+\s+|--(?:user|group)\s+\S+\s+|-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
+    r"(?:(?:\s+-[^\s-]\S*)*\s*(?:--?(?:\s|$)|$|[;&|\n)])"
+    r"|(?:\s+-[^\s-]\S*)*\s+-[A-Za-z]*s[A-Za-z]*(?:\s|$))"
 )
 # Quoted text is data (a commit message, an echo), never a pipeline. Blanked
 # before the pipe-to-shell search so `git commit -m 'avoid curl x | bash; ...'`
