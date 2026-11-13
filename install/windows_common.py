@@ -387,6 +387,10 @@ def copy_release(source, dest):
     def ignore(_dir, names):
         return [n for n in names if n in EXCLUDE_NAMES]
     shutil.copytree(source, dest, ignore=ignore)
+    # copytree copies the SOURCE directory's mtime onto dest, so every release
+    # carried the checkout's mtime and prune_releases could not tell new from
+    # old. Stamp it now.
+    os.utime(dest, None)
     return dest
 
 
@@ -432,7 +436,9 @@ def prune_releases(releases_dir, keep=KEEP_RELEASES, current=None):
     except Exception:
         return []
     entries = [e for e in entries if os.path.isdir(e)]
-    entries.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    # The name (a stamp() timestamp) breaks ties: releases copied before
+    # copy_release reset the mtime all share the checkout's.
+    entries.sort(key=lambda p: (os.path.getmtime(p), os.path.basename(p)), reverse=True)
     pruned = []
     current_real = os.path.normcase(os.path.abspath(current)) if current else None
     for old in entries[keep:]:

@@ -336,6 +336,29 @@ class TestInstallerEndToEnd(unittest.TestCase):
             self.assertTrue(os.path.isdir(path), path)
 
 
+class TestReleasePruning(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_a_copied_release_is_stamped_now_not_with_the_source_mtime(self):
+        src = os.path.join(self.tmp, "src")
+        os.makedirs(src)
+        os.utime(src, (1000000000, 1000000000))
+        dest = wc.copy_release(src, os.path.join(self.tmp, "rel"))
+        self.assertGreater(os.path.getmtime(dest), 1000000000 + 86400)
+
+    def test_equal_mtimes_keep_the_newest_stamps(self):
+        releases = os.path.join(self.tmp, "releases")
+        names = ["20261101T000000", "20261102T000000", "20261103T000000", "20261104T000000"]
+        for n in names:
+            os.makedirs(os.path.join(releases, n))
+            os.utime(os.path.join(releases, n), (1000000000, 1000000000))
+        pruned = wc.prune_releases(releases, keep=2)
+        self.assertEqual(sorted(os.listdir(releases)), names[2:])
+        self.assertEqual(sorted(os.path.basename(p) for p in pruned), names[:2])
+
+
 class TestUninstall(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airlock-win-uninstall-test-")
