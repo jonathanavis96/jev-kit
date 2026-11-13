@@ -91,19 +91,13 @@ _PATTERNS = [
 _BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])")
 
 
-_PATH_PART_MAX = 16
-
-
 def _redact_base64_run(match):
-    """A run that looks like a path made of words is left alone: it has a
-    `/`, no digit, no `+`, no `=` padding, and no piece between slashes
-    longer than 16 characters (`home/user/code/project/src/components`).
-    Anything else is redacted, so a long letters-only secret that happens
-    to contain a `/` still has a piece too long to pass. A path with a
-    digit in it is redacted too: this errs toward redaction."""
+    """A run with a `/` but no digit and no `+` is a path made of words
+    (`home/user/code/project/src/components`), not encoded bytes: 32 random
+    base64 characters avoid every digit and `+` about one time in 400, and
+    must also contain a `/`. A path with a digit in it is still redacted."""
     run = match.group(0)
-    if ("/" in run and not any(c.isdigit() or c in "+=" for c in run)
-            and all(len(part) <= _PATH_PART_MAX for part in run.split("/"))):
+    if "/" in run and not any(c.isdigit() or c == "+" for c in run):
         return run
     return REDACTED
 

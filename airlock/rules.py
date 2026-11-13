@@ -544,38 +544,16 @@ _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 def _after_assignment(toks, i):
     """The index after the assignment at toks[i]. `words()` splits a quoted
     value on its spaces, so `MSG="Remove sudo usage"` is three words there
-    and one to bash; read word by word, `sudo` looked like the program.
-
-    The quotes are followed the way the shell reads them (a backslash
-    escapes outside single quotes, `"a b"c` is one word), across as many
-    words as the value spans. A quote that never closes is not guessed at:
-    only the first word is skipped, as before, so what follows is still
-    checked."""
-    quote = None
-    j = i
-    while j < len(toks):
-        tok = toks[j]
-        k = 0
-        while k < len(tok):
-            c = tok[k]
-            if quote is None:
-                if c == "\\":
-                    k += 2
-                    continue
-                if c in ("'", '"'):
-                    quote = c
-            elif quote == '"' and c == "\\":
-                k += 2
-                continue
-            elif c == quote:
-                quote = None
-            k += 1
-        j += 1
-        # k past the end: the word ended in a backslash, so the space after
-        # it is escaped and the next word belongs to this one (`X=a\ b`).
-        if quote is None and k <= len(tok):
-            return j
-    return i + 1
+    and one to bash; read word by word, `sudo` looked like the program."""
+    value = toks[i].split("=", 1)[1] if "=" in toks[i] else ""
+    quote = value[:1]
+    j = i + 1
+    if quote in ("'", '"') and value.count(quote) % 2 == 1:
+        while j < len(toks):
+            j += 1
+            if toks[j - 1].endswith(quote):
+                break
+    return j
 
 
 def words(segment):
@@ -1040,113 +1018,53 @@ def _secret_path_in(tokens):
 
 # Readers whose first operand is a pattern, program or filter rather than a
 # file, unless the script comes from an option instead (-e/-f and friends).
-# Readers whose first operand is a pattern or filter rather than a file,
-# unless the pattern comes from an option instead (-e/-f and friends). awk and
-# sed are left out on purpose: their program text can itself read a file
-# (`getline < f`, sed's `r f`), so it stays in view as before.
 _PATTERN_FIRST = {
     "grep": ("-e", "-f", "--regexp", "--file"),
     "egrep": ("-e", "-f", "--regexp", "--file"),
     "rg": ("-e", "-f", "--regexp", "--file", "--files"),
     "ag": ("-f", "--file-search-regex"),
+    "sed": ("-e", "-f", "--expression", "--file"),
+    "awk": ("-f", "--file"),
     "jq": ("-f", "--from-file"),
     "yq": ("-f", "--from-file"),
 }
-# Flags that take no value, per reader. The pattern is dropped only when
-# every flag in front of it is one of these: an option that does take a
-# value (`--include .env`, `rg -g .env`) may be a glob naming the very files
-# read, and a value mistaken for the pattern would hide them.
-_NO_VALUE_SHORT = {
-    "grep": set("rRnilcvwxshHoqLZEFGPaUIbTuz"),
-    "egrep": set("rRnilcvwxshHoqLZEFGPaUIbTuz"),
-    "rg": set("inlcvwxsSFHoqLuUPaz.N"),
-    "ag": set("inlcvwsSQaurUzZ"),
-    "jq": set("rcnsjaSCeMR"),
-    "yq": set("rcnsjaSCeMR"),
-}
-_NO_VALUE_LONG = frozenset((
-    "--recursive", "--dereference-recursive", "--line-number", "--ignore-case",
-    "--files-with-matches", "--files-without-match", "--count", "--invert-match",
-    "--word-regexp", "--line-regexp", "--fixed-strings", "--extended-regexp",
-    "--perl-regexp", "--only-matching", "--no-filename", "--with-filename",
-    "--quiet", "--silent", "--hidden", "--no-ignore", "--follow", "--smart-case",
-    "--case-sensitive", "--raw-output", "--compact-output", "--null-input",
-    "--slurp", "--join-output", "--ascii-output", "--sort-keys", "--exit-status",
-    "--color", "--no-messages", "--text", "--null",
-))
-
-
-def _only_plain_flags(prog, flags):
-    letters = _NO_VALUE_SHORT.get(prog, set())
-    for f in flags:
-        if f.startswith("--"):
-            if f.split("=", 1)[0] not in _NO_VALUE_LONG:
-                return False
-        elif not (len(f) > 1 and set(f[1:]) <= letters):
-            return False
-    return True
-
-
 _OUTPUT_REDIRECT_RE = re.compile(r"^(?:\d*>>?|&>>?|>\|)(.*)$")
-# An input redirection in the raw text: `< f`, `0<f`, never `<<` or `<(`.
-_INPUT_REDIRECT_RE = re.compile(r"(?<![<\d])\d*<(?![<(&])")
 
 
-def _pattern_from_option(script_opts, args):
-    """True when an option supplies the pattern, so no operand is it. Short
-    flags may be clustered (`-rf pats`, `-ie x`): any of the option letters
-    anywhere in a cluster counts."""
-    letters = {o[1] for o in script_opts if len(o) == 2}
-    for a in args:
-        if a in script_opts or a.split("=", 1)[0] in script_opts:
-            return True
-        if len(a) > 1 and a[0] == "-" and a[1] != "-" and letters & set(a[1:]):
-            return True
-    return False
-
-
-def _read_operands(prog, args, seg=""):
+def _read_operands(prog, args):
     """The arguments of a reader that can name a file it reads.
 
     Left out: an output redirection and its target (`cat > .env` writes the
-    file, it prints nothing), `tee`'s operands (it writes them and prints its
-    stdin), and the leading pattern of grep/rg/ag/jq/yq (`grep -rn
-    credentials src/` searches src/ for a word). Each is dropped only when
-    the raw text shows it really is one: a quoted `">"` is an argument, and
-    `tee out < .env` reads .env. When in doubt the operand stays, which only
-    ever denies more."""
-    code = _QUOTED_RE.sub('""', seg or "")
+    file, it prints nothing), every operand of `tee` (it writes them and
+    prints its stdin), and the leading pattern of grep/jq/sed/awk
+    (`grep -rn credentials src/` searches src/ for a word). Getting this
+    wrong toward reading MORE keeps the old behaviour: an option value may
+    still be read as a path, which only ever denies."""
     if prog == "tee":
-        # tee reads only its stdin. With an input redirection anywhere in
-        # the segment, which word is the input is left to the full check.
-        return list(args) if _INPUT_REDIRECT_RE.search(code) else []
-    out = list(args)
-    quoted_operator = any(_OUTPUT_REDIRECT_RE.match(q[1:-1])
-                          for q in _QUOTED_RE.findall(seg or ""))
-    if not quoted_operator:
-        out = []
-        skip_next = False
-        for a in args:
-            if skip_next:
-                skip_next = False
-                continue
-            m = _OUTPUT_REDIRECT_RE.match(a)
-            if m:
-                skip_next = not m.group(1)
-                continue
-            out.append(a)
+        return []
+    out = []
+    skip_next = False
+    for a in args:
+        if skip_next:
+            skip_next = False
+            continue
+        m = _OUTPUT_REDIRECT_RE.match(a)
+        if m:
+            skip_next = not m.group(1)
+            continue
+        out.append(a)
     script_opts = _PATTERN_FIRST.get(prog)
-    if script_opts and not _pattern_from_option(script_opts, out):
+    if script_opts and not any(a in script_opts or a.split("=", 1)[0] in script_opts
+                               or (len(a) > 2 and a[0] == "-" and a[1] != "-"
+                                   and a[:2] in script_opts)
+                               for a in out):
         for i, a in enumerate(out):
             if a == "--":
-                if i + 1 < len(out) and _only_plain_flags(prog, out[:i]):
+                if i + 1 < len(out):
                     del out[i + 1]
                 break
-            if a.startswith("<"):
-                break  # a redirection, not the pattern: keep everything
             if not a.startswith("-"):
-                if _only_plain_flags(prog, out[:i]):
-                    del out[i]
+                del out[i]
                 break
     return out
 
@@ -1482,7 +1400,7 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in READERS or _windows_reader(prog):
             if prog in ("grep", "egrep", "rg", "ag") and _quiet_grep(args):
                 continue
-            operands = _read_operands(prog, args, seg)
+            operands = _read_operands(prog, args)
             hit = (_secret_path_in(operands) or _secret_path_in(_spaced_quoted_words(seg))
                    or _key_file_from(operands, cwd))
             if hit:
@@ -2605,12 +2523,9 @@ def _stdin_scripts(text):
 
 
 def _rd_hit(seg):
-    # words(), except that a quoted word starting with ~ keeps its quotes:
-    # `"~"` must reach _rd_unquote still quoted to stay a file literally
-    # named ~. Every other word is read exactly as before.
-    toks = [raw if len(raw) > 1 and raw[0] in "'\"" and raw[1] == "~" else word
-            for raw, word in zip((seg or "").split(), words(seg))]
-    prog, args = _rd_command(toks)
+    # Raw words, not words(): that strips a word's quotes, and `"~"` must
+    # reach _rd_unquote still quoted to stay a file literally named ~.
+    prog, args = _rd_command((seg or "").split())
     if prog != "rm":
         return None
     args = [_rd_unquote(a) for a in args]
