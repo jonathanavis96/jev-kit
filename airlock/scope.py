@@ -111,7 +111,9 @@ _VALUE_FLAGS = {
 
 _SKIP_PREFIX_TOKENS = {"sudo", "nice", "time", "env"}
 
-_SEQUENTIAL_OPS = ("&&", "||", ";")
+# A newline ends a command as `;` does. Heredoc bodies are stripped before
+# the split, so their lines never become statements.
+_SEQUENTIAL_OPS = ("&&", "||", ";", "\n")
 _PIPE_OP = ("|",)
 
 
@@ -423,10 +425,12 @@ def strip_shell_comment(command):
     return "".join(out)
 
 
-def _split_top_level(s, ops):
+def _split_top_level(s, ops, windows=False):
     """Split `s` on any operator in `ops` that appears outside quotes.
     Operators are tried longest-first per position so '&&' isn't split as
-    two '&' or '||' as two undefined single-char ops."""
+    two '&' or '||' as two undefined single-char ops. Off Windows a
+    backslash escapes the next character, so `find ... -exec ls {} \\;` is
+    one stage; on Windows it is a path separator and escapes nothing."""
     ops = sorted(ops, key=len, reverse=True)
     parts = []
     current = []
@@ -445,6 +449,11 @@ def _split_top_level(s, ops):
             quote = c
             current.append(c)
             i += 1
+            continue
+        if c == "\\" and not windows and i + 1 < n:
+            current.append(c)
+            current.append(s[i + 1])
+            i += 2
             continue
         matched = None
         for op in ops:
@@ -768,9 +777,25 @@ def _classify_fd(args, cwd, windows=False):
     return [_expand(root, cwd, windows)]
 
 
+def _pattern_from_option(program, args):
+    """True when no positional is the pattern: it came from -e/-f (or their
+    long forms), or `rg --files` lists files and takes no pattern at all."""
+    for tok in args:
+        if tok in ("-e", "--regexp", "-f", "--file") or tok.startswith(("--regexp=", "--file=")):
+            return True
+        if len(tok) > 2 and tok[0] == "-" and tok[1] in "ef":
+            return True  # `-efoo`, `-fpatterns.txt`
+        if program == "rg" and tok == "--files":
+            return True
+    return False
+
+
 def _classify_grep_family(program, args, cwd, windows=False):
     positionals = _positional_args(args)
-    paths = positionals[1:] if positionals else []
+    if _pattern_from_option(program, args):
+        paths = positionals
+    else:
+        paths = positionals[1:] if positionals else []
     recursive = _has_flag(args, "-r", "-R", "--recursive") or program in _RECURSIVE_BY_DEFAULT
 
     if paths:
@@ -989,10 +1014,14 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     # "$HOME" -name x` runs the /opt search alone, and accumulating the
     # commented $HOME root turned a single directory into a disk-wide
     # verdict (Codex P2, PR #1).
+    if not windows:
+        # Bodies first, then line continuations: a continuation joins two
+        # lines into one command, which the newline split below must not cut.
+        command = strip_heredocs(command).replace("\\\n", "")
     command = strip_shell_comment(command)
 
     try:
-        statements = _split_top_level(command, _SEQUENTIAL_OPS)
+        statements = _split_top_level(command, _SEQUENTIAL_OPS, windows)
     except Exception:
         return {"scope": "unknown", "program": None, "roots": []}
 
@@ -1028,7 +1057,7 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
             continue
 
         try:
-            stages = _split_top_level(statement, _PIPE_OP)
+            stages = _split_top_level(statement, _PIPE_OP, windows)
         except Exception:
             continue
         stages = [s.strip() for s in stages if s.strip()]
