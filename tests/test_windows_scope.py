@@ -126,6 +126,14 @@ class TestPathSpellings(unittest.TestCase):
         self.assertEqual(result["scope"], "disk_wide")
         self.assertEqual(result["roots"], [HOME])
 
+    def test_git_bash_ls_r_keeps_its_msys_root(self):
+        """`/c/...` was read as a cmd.exe /flag, so the root was dropped and
+        the search was measured against the cwd."""
+        for c in ("ls -R /c/Users/alice", "ls -R /c", "Get-ChildItem -Recurse /c/"):
+            self.assertEqual(classify(c)["scope"], "disk_wide", c)
+        self.assertEqual(classify("ls -R /c/Users/alice")["roots"], [HOME])
+        self.assertEqual(classify("dir /s C:\\")["roots"], ["C:\\"])
+
     def test_a_backslash_is_a_separator_not_an_escape(self):
         """POSIX shlex eats the backslash and `dir /s C:\\` becomes `C:`, so
         every drive root would be misread as a relative path."""

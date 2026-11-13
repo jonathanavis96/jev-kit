@@ -814,12 +814,17 @@ def _classify_dir_arg(args, cwd, windows=False):
 
 # --- Windows search shapes ---------------------------------------------------
 
-def _win_flag(tok):
+def _win_flag(tok, slash=True):
     """`/S`, `-Recurse` and `--recurse` all normalise to a lower-case
-    `-`-prefixed form so one table covers cmd.exe and PowerShell alike."""
+    `-`-prefixed form so one table covers cmd.exe and PowerShell alike.
+    With `slash` false a `/...` token is a path, never a flag: `ls` is Git
+    Bash's coreutils or PowerShell's Get-ChildItem, and neither takes cmd.exe
+    /flags, so `ls -R /c/Users` names its root."""
     if not tok:
         return ""
     if tok.startswith("/"):
+        if not slash:
+            return ""
         return "-" + tok[1:].lower()
     if tok.startswith("--"):
         return "-" + tok[2:].lower()
@@ -828,18 +833,18 @@ def _win_flag(tok):
     return ""
 
 
-def _win_has_flag(args, *names):
+def _win_has_flag(args, *names, slash=True):
     wanted = set(names)
-    return any(_win_flag(a) in wanted for a in args)
+    return any(_win_flag(a, slash) in wanted for a in args)
 
 
-def _win_positionals(args, value_flags=()):
+def _win_positionals(args, value_flags=(), slash=True):
     """Positional tokens, skipping flags in either cmd.exe or PowerShell
     spelling and the value of any flag that takes one."""
     out = []
     i = 0
     while i < len(args):
-        flag = _win_flag(args[i])
+        flag = _win_flag(args[i], slash)
         if flag:
             if flag in value_flags:
                 i += 2
@@ -854,7 +859,10 @@ def _win_positionals(args, value_flags=()):
 def _dir_part(spec):
     """The directory half of a file spec: `C:\\code\\*.py` -> `C:\\code`.
     A spec that is only a wildcard (`*.py`) has no directory half."""
-    s = str(spec).replace("/", "\\")
+    s = str(spec)
+    # An MSYS or Cygwin spelling (`/c/Users`) names a drive: canonical() maps
+    # it, where a bare slash swap made it the relative-looking `\c\Users`.
+    s = winpath.canonical(s) if s.startswith("/") else s.replace("/", "\\")
     if "*" not in s and "?" not in s:
         return s
     head = s.rsplit("\\", 1)[0]
@@ -900,15 +908,15 @@ def _classify_findstr(args, cwd):
     return [_expand(".", cwd, True)]
 
 
-def _classify_get_childitem(args, cwd):
+def _classify_get_childitem(args, cwd, slash=True):
     """`Get-ChildItem -Recurse [-Path] <dir>` and its aliases gci / ls / dir.
     Without -Recurse it lists one directory and is not a search."""
-    if not _win_has_flag(args, *_PS_RECURSE_FLAGS):
+    if not _win_has_flag(args, *_PS_RECURSE_FLAGS, slash=slash):
         return None
     for i, tok in enumerate(args):
-        if _win_flag(tok) in ("-path", "-literalpath") and i + 1 < len(args):
+        if _win_flag(tok, slash) in ("-path", "-literalpath") and i + 1 < len(args):
             return [_expand(args[i + 1], cwd, True)]
-    for tok in _win_positionals(args, _PS_VALUE_FLAGS):
+    for tok in _win_positionals(args, _PS_VALUE_FLAGS, slash):
         head = _dir_part(tok)
         if head:
             return [_expand(head, cwd, True)]
@@ -1096,13 +1104,14 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
             # Windows shapes first: on Windows `dir` and `ls` mean
             # Get-ChildItem, not the coreutils programs of the same name.
             if windows and program in ("get-childitem", "gci", "childitem"):
-                roots = _classify_get_childitem(args, current_cwd)
+                roots = _classify_get_childitem(args, current_cwd, slash=False)
                 if roots is None:
                     continue
             elif windows and program in ("dir", "ls") and (
-                    _win_has_flag(args, "-s") or _win_has_flag(args, *_PS_RECURSE_FLAGS)):
-                if _win_has_flag(args, *_PS_RECURSE_FLAGS):
-                    roots = _classify_get_childitem(args, current_cwd)
+                    _win_has_flag(args, "-s") or _win_has_flag(
+                        args, *_PS_RECURSE_FLAGS, slash=program != "ls")):
+                if _win_has_flag(args, *_PS_RECURSE_FLAGS, slash=program != "ls"):
+                    roots = _classify_get_childitem(args, current_cwd, slash=program != "ls")
                 else:
                     roots = _classify_cmd_dir(args, current_cwd)
                 if roots is None:
