@@ -89,5 +89,26 @@ class TestLog(unittest.TestCase):
             jlog.append({"a": 1})  # must not raise
 
 
+class TestReportPrintsWhatLogKept(unittest.TestCase):
+    def test_a_lone_surrogate_in_a_deny_row_does_not_crash_the_report(self):
+        import io
+        from airlock import report
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "shadow.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"ts": "2026-11-13T00:00:00Z", "guard": "rules", "would_deny": true,'
+                        ' "input_summary": {"command": "echo \\ud800 caf\\u00e9"}}\n')
+            out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+            with mock.patch.object(report, "LOG_FILE", path), \
+                 mock.patch.object(report.sys, "argv", ["report"]), \
+                 mock.patch.object(report.sys, "stdout", out), \
+                 mock.patch.object(report, "print_enforce_summary", lambda rows: None):
+                report.main()
+                out.flush()
+                text = out.buffer.getvalue().decode("utf-8")
+        self.assertIn("would_deny rows", text)
+        self.assertIn("café", text)
+
+
 if __name__ == "__main__":
     unittest.main()

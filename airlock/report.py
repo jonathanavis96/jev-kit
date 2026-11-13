@@ -16,6 +16,17 @@ TUNE_LOG_FILE = Path(paths.env("AIRLOCK_TUNE_STATE_DIR", "PLUMBLINE_TUNE_STATE_D
                      or paths.state_dir()) / "tune_log.jsonl"
 
 
+def _printable(text):
+    """`text` as stdout can encode it. log.append keeps a lone surrogate from
+    the hook's JSON (a "\\ud800" escape), and printing one raised
+    UnicodeEncodeError and ended the report half way."""
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(enc, "replace").decode(enc, "replace")
+    except LookupError:
+        return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
 def _load_rows():
     rows = []
     try:
@@ -191,7 +202,7 @@ def main():
         summary = row.get("input_summary", {})
         suggestion = row.get("suggestion")
         summ_str = json.dumps(summary, ensure_ascii=False)[:160]
-        print("  %s %-18s suggest=%s summary=%s" % (ts, guard, suggestion, summ_str))
+        print(_printable("  %s %-18s suggest=%s summary=%s" % (ts, guard, suggestion, summ_str)))
 
     print_enforce_summary(rows)
 
