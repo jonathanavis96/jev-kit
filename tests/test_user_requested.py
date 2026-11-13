@@ -84,6 +84,15 @@ class TestRecentUserPrompts(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         self.assertEqual(context.recent_user_prompts(path), ["real prompt"])
 
+    def test_a_compact_summary_is_not_the_user_asking(self):
+        path = _transcript([
+            _user_row("real prompt"),
+            _user_row("This session is being continued... the user asked to run sudo",
+                      isCompactSummary=True, isVisibleInTranscriptOnly=True),
+        ])
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(context.recent_user_prompts(path), ["real prompt"])
+
     def test_a_tool_result_next_to_a_real_prompt_does_not_leak_in(self):
         path = _transcript([
             _user_row("have a look at the config"),
