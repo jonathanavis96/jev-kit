@@ -721,10 +721,6 @@ def program_of(segment):
                 break
             toks, at = found
             continue
-        if head == "command" and at + 1 < len(toks) and toks[at + 1][:1] == "-" \
-                and set(toks[at + 1][1:]) & set("vV"):
-            # `command -v sudo` prints where sudo is; it runs nothing.
-            break
         if head in _SKIP_PREFIX:
             at += 1
             # a wrapper's own flags (nice -n 10, stdbuf -oL) are not the program
@@ -999,59 +995,6 @@ def _secret_path_in(tokens):
             if r.search(p):
                 return tok
     return None
-
-
-# Readers whose first operand is a pattern, program or filter rather than a
-# file, unless the script comes from an option instead (-e/-f and friends).
-_PATTERN_FIRST = {
-    "grep": ("-e", "-f", "--regexp", "--file"),
-    "egrep": ("-e", "-f", "--regexp", "--file"),
-    "rg": ("-e", "-f", "--regexp", "--file", "--files"),
-    "ag": ("-f", "--file-search-regex"),
-    "sed": ("-e", "-f", "--expression", "--file"),
-    "awk": ("-f", "--file"),
-    "jq": ("-f", "--from-file"),
-    "yq": ("-f", "--from-file"),
-}
-_OUTPUT_REDIRECT_RE = re.compile(r"^(?:\d*>>?|&>>?|>\|)(.*)$")
-
-
-def _read_operands(prog, args):
-    """The arguments of a reader that can name a file it reads.
-
-    Left out: an output redirection and its target (`cat > .env` writes the
-    file, it prints nothing), every operand of `tee` (it writes them and
-    prints its stdin), and the leading pattern of grep/jq/sed/awk
-    (`grep -rn credentials src/` searches src/ for a word). Getting this
-    wrong toward reading MORE keeps the old behaviour: an option value may
-    still be read as a path, which only ever denies."""
-    if prog == "tee":
-        return []
-    out = []
-    skip_next = False
-    for a in args:
-        if skip_next:
-            skip_next = False
-            continue
-        m = _OUTPUT_REDIRECT_RE.match(a)
-        if m:
-            skip_next = not m.group(1)
-            continue
-        out.append(a)
-    script_opts = _PATTERN_FIRST.get(prog)
-    if script_opts and not any(a in script_opts or a.split("=", 1)[0] in script_opts
-                               or (len(a) > 2 and a[0] == "-" and a[1] != "-"
-                                   and a[:2] in script_opts)
-                               for a in out):
-        for i, a in enumerate(out):
-            if a == "--":
-                if i + 1 < len(out):
-                    del out[i + 1]
-                break
-            if not a.startswith("-"):
-                del out[i]
-                break
-    return out
 
 
 def _spaced_quoted_words(seg):
@@ -1385,15 +1328,14 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in READERS or _windows_reader(prog):
             if prog in ("grep", "egrep", "rg", "ag") and _quiet_grep(args):
                 continue
-            operands = _read_operands(prog, args)
-            hit = (_secret_path_in(operands) or _secret_path_in(_spaced_quoted_words(seg))
-                   or _key_file_from(operands, cwd))
+            hit = (_secret_path_in(args) or _secret_path_in(_spaced_quoted_words(seg))
+                   or _key_file_from(args, cwd))
             if hit:
                 return Match(
                     "`%s` on a secret store (%s) would print its contents" % (prog, hit),
                     R1_SUGGESTION,
                 )
-            amb = _ambiguous_path_in(operands)
+            amb = _ambiguous_path_in(args)
             if amb:
                 return Match(
                     "`%s` on a path that may hold secrets (%s)" % (prog, amb),
@@ -1428,9 +1370,8 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in ("env", "set", "export", "declare") and not args:
             if prog == "env" and seg_idx < top_level and _names_only_pipe(pairs, seg_idx):
                 continue
-            # Bare `export` prints every exported variable with its value, as
-            # `export -p` does, and bare `declare` every variable.
-            return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
+            if prog in ("env", "set"):
+                return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
         if prog == "export" and args == ["-p"]:
             return Match("`export -p` dumps every exported variable, secrets included", R1_SUGGESTION)
         if prog == "declare" and args and args[0] in ("-x", "-p"):

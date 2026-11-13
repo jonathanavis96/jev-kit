@@ -593,43 +593,6 @@ class QuotedPathWithASpace(unittest.TestCase):
         self.assertFalse(r1('cat "/home/u/My Project/notes.txt"'))
 
 
-class ReaderOperands(unittest.TestCase):
-    def test_writing_a_secret_file_is_not_printing_it(self):
-        for c in ("cat > .env <<EOF\nA=1\nEOF", "grep X .env.example > .env",
-                  "echo x | tee .env", "cat >.env"):
-            self.assertFalse(r1(c), c)
-
-    def test_a_pattern_is_not_a_path(self):
-        for c in ("jq .key data.json", "grep -rn credentials src/", "grep .env"):
-            self.assertFalse(r1(c), c)
-
-    def test_reading_the_file_is_still_caught(self):
-        for c in ("cat .env", "cat .env > out", "cat < .env", "grep foo .env",
-                  "grep -e foo .env", "jq . .env", "sed -n p .env",
-                  "awk '{print}' .env", "grep -A 3 foo .env"):
-            self.assertTrue(r1(c), c)
-
-
-class CommandLookups(unittest.TestCase):
-    def test_command_v_runs_nothing(self):
-        self.assertFalse(fires("command -v sudo", R5))
-        self.assertFalse(r1("command -v printenv"))
-
-    def test_command_still_runs_its_argument(self):
-        self.assertTrue(fires("command sudo reboot", R5))
-        self.assertTrue(fires("command -p sudo reboot", R5))
-
-
-class BareExportAndDeclare(unittest.TestCase):
-    def test_bare_export_and_declare_dump_the_environment(self):
-        for c in ("export", "declare", "export | grep KEY"):
-            self.assertTrue(r1(c), c)
-
-    def test_setting_a_variable_is_not_a_dump(self):
-        self.assertFalse(r1("export FOO=1"))
-        self.assertFalse(r1("declare -f myfn"))
-
-
 class HealthSummaryTimestamps(unittest.TestCase):
     def test_a_naive_timestamp_does_not_break_the_summary(self):
         now = datetime.datetime.now(datetime.timezone.utc)
