@@ -1038,19 +1038,18 @@ def _secret_path_in(tokens):
     return None
 
 
-# Readers whose first operand is a pattern, program or filter rather than a
-# file, unless the script comes from an option instead (-e/-f and friends).
 # Readers whose first operand is a pattern or filter rather than a file,
 # unless the pattern comes from an option instead (-e/-f and friends). awk and
 # sed are left out on purpose: their program text can itself read a file
-# (`getline < f`, sed's `r f`), so it stays in view as before.
+# (`getline < f`, sed's `r f`), so it stays in view as before. So is yq: v4
+# reads a lone operand as the file (`yq secrets.yaml` prints it), so its
+# first operand may be the very file read.
 _PATTERN_FIRST = {
     "grep": ("-e", "-f", "--regexp", "--file"),
     "egrep": ("-e", "-f", "--regexp", "--file"),
     "rg": ("-e", "-f", "--regexp", "--file", "--files"),
     "ag": ("-f", "--file-search-regex"),
     "jq": ("-f", "--from-file"),
-    "yq": ("-f", "--from-file"),
 }
 # Flags that take no value, per reader. The pattern is dropped only when
 # every flag in front of it is one of these: an option that does take a
@@ -1062,7 +1061,6 @@ _NO_VALUE_SHORT = {
     "rg": set("inlcvwxsSFHoqLuUPaz.N"),
     "ag": set("inlcvwsSQaurUzZ"),
     "jq": set("rcnsjaSCeMR"),
-    "yq": set("rcnsjaSCeMR"),
 }
 _NO_VALUE_LONG = frozenset((
     "--recursive", "--dereference-recursive", "--line-number", "--ignore-case",
@@ -1110,7 +1108,7 @@ def _read_operands(prog, args, seg=""):
 
     Left out: an output redirection and its target (`cat > .env` writes the
     file, it prints nothing), `tee`'s operands (it writes them and prints its
-    stdin), and the leading pattern of grep/rg/ag/jq/yq (`grep -rn
+    stdin), and the leading pattern of grep/rg/ag/jq (`grep -rn
     credentials src/` searches src/ for a word). Each is dropped only when
     the raw text shows it really is one: a quoted `">"` is an argument, and
     `tee out < .env` reads .env. When in doubt the operand stays, which only

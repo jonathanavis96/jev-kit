@@ -134,6 +134,21 @@ class TestPathSpellings(unittest.TestCase):
         self.assertEqual(classify("ls -R /c/Users/alice")["roots"], [HOME])
         self.assertEqual(classify("dir /s C:\\")["roots"], ["C:\\"])
 
+    def test_dir_with_a_dash_recurse_flag_keeps_its_msys_root(self):
+        """`dir -R /c/` is Get-ChildItem or coreutils, not cmd.exe: the
+        /-token is its root, not a switch."""
+        for c in ("dir -R /c/", "dir -r /", "dir -Recurse /c/Users/alice"):
+            self.assertEqual(classify(c)["scope"], "disk_wide", c)
+        self.assertEqual(classify("dir -Recurse /c/Users")["roots"], ["C:\\Users"])
+        self.assertEqual(classify("dir -Recurse /c/Users/alice")["roots"], [HOME])
+
+    def test_a_continued_line_keeps_its_root(self):
+        """Continuations are not joined on Windows, so a newline must not
+        split the command and drop the root on the continued line."""
+        for c in ("Get-ChildItem -Recurse `\n  -Path C:\\ -Filter *.log",
+                  "grep -r \\\n  password /c/"):
+            self.assertEqual(classify(c)["scope"], "disk_wide", repr(c))
+
     def test_a_backslash_is_a_separator_not_an_escape(self):
         """POSIX shlex eats the backslash and `dir /s C:\\` becomes `C:`, so
         every drive root would be misread as a relative path."""

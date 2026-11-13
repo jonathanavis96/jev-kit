@@ -1029,7 +1029,11 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     command = strip_shell_comment(command)
 
     try:
-        statements = _split_top_level(command, _SEQUENTIAL_OPS, windows)
+        # On Windows the continuations are not joined (Git Bash `\`,
+        # PowerShell backtick, cmd `^`), so a newline split there would cut a
+        # continued command and lose its root: keep main's reading instead.
+        ops = _SEQUENTIAL_OPS if not windows else _SEQUENTIAL_OPS[:-1]
+        statements = _split_top_level(command, ops, windows)
     except Exception:
         return {"scope": "unknown", "program": None, "roots": []}
 
@@ -1110,8 +1114,13 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
             elif windows and program in ("dir", "ls") and (
                     _win_has_flag(args, "-s") or _win_has_flag(
                         args, *_PS_RECURSE_FLAGS, slash=program != "ls")):
-                if _win_has_flag(args, *_PS_RECURSE_FLAGS, slash=program != "ls"):
-                    roots = _classify_get_childitem(args, current_cwd, slash=program != "ls")
+                if _win_has_flag(args, *_PS_RECURSE_FLAGS, slash=False):
+                    # A PowerShell or coreutils recurse flag (`-R`,
+                    # `-Recurse`): neither takes cmd.exe /flags, so a
+                    # /-token is a path (`dir -R /c/`), for dir as for ls.
+                    roots = _classify_get_childitem(args, current_cwd, slash=False)
+                elif _win_has_flag(args, *_PS_RECURSE_FLAGS, slash=program != "ls"):
+                    roots = _classify_get_childitem(args, current_cwd, slash=True)
                 else:
                     roots = _classify_cmd_dir(args, current_cwd)
                 if roots is None:

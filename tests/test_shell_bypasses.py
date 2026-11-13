@@ -609,6 +609,13 @@ class ReaderOperands(unittest.TestCase):
                   "awk '{print}' .env", "grep -A 3 foo .env"):
             self.assertTrue(r1(c), c)
 
+    def test_yq_lone_operand_is_the_file_read(self):
+        """yq v4 reads a lone operand as the document (the expression
+        defaults to `.`), so it is never dropped as the filter."""
+        for c in ("yq ~/.aws/credentials", "yq secrets.yaml", "yq .env",
+                  "yq -r .env", "yq . .env"):
+            self.assertTrue(r1(c), c)
+
 
 class ReaderOperandsFailSafe(unittest.TestCase):
     """Leaving an operand out of R1 must never hide a read: each of these
