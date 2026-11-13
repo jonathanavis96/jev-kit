@@ -989,19 +989,6 @@ def filename_search_suggestion(windows=None, roots=None, wsl=None,
             return ES_WSL_SUGGESTION
     if kind is None:
         return None
-    if roots and str(kind).split("-")[0] != "system":
-        # Plain Linux with the $HOME-only database: the same question the WSL
-        # branch above asks. A directory outside $HOME is ground the index
-        # does not hold, so steering `find /opt` at it found nothing. With
-        # part of the search in $HOME the two-line advice says which half
-        # each command covers; with none, the crawl typed is the answer.
-        # A search from / itself keeps the plain plocate advice.
-        if any(not root_is_plocate_covered(r, db_kind=kind) and not root_is_wsl_fs_root(r)
-               for r in roots):
-            if any_root_is_plocate_covered(roots, db_kind=kind) \
-                    or any_root_is_wsl_fs_root(roots):
-                return _linux_mixed_suggestion(plocate_line)
-            return None
     if plocate_line == _HOME_DB_LINE:
         return PLOCATE_SUGGESTION
     return plocate_line

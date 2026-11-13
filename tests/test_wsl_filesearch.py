@@ -93,23 +93,12 @@ class TestFilenameSearchSuggestionWsl(unittest.TestCase):
             policy.ES_SUGGESTION,
         )
 
-    def test_non_wsl_linux_with_mnt_root_is_not_steered(self):
-        # A non-WSL Linux box has no Everything to fall back to, and there
-        # /mnt/c/Users is an ordinary directory outside $HOME that the home
-        # database does not hold: the crawl is the answer, not a deny.
-        self.assertIsNone(
-            policy.filename_search_suggestion(wsl=False, roots=["/mnt/c/Users"],
-                                              db_kind="home"))
-
-    def test_plain_linux_root_outside_home_is_not_steered_at_the_home_db(self):
-        home = os.path.expanduser("~")
-        self.assertIsNone(policy.filename_search_suggestion(
-            wsl=False, roots=["/opt"], db_kind="home"))
-        self.assertEqual(policy.filename_search_suggestion(
-            wsl=False, roots=[home, "/opt"], db_kind="home"),
-            policy.LINUX_MIXED_SUGGESTION)
-        self.assertEqual(policy.filename_search_suggestion(
-            wsl=False, roots=["/opt"], db_kind="system"), "plocate -i '<pattern>'")
+    def test_non_wsl_linux_with_mnt_root_gets_plocate(self):
+        # A non-WSL Linux box has no Everything to fall back to.
+        self.assertEqual(
+            policy.filename_search_suggestion(wsl=False, roots=["/mnt/c/Users"]),
+            policy.PLOCATE_SUGGESTION,
+        )
 
 
 class TestRootIsWindowsHost(unittest.TestCase):
