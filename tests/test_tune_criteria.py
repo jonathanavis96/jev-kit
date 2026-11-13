@@ -162,5 +162,15 @@ class TestApplyCriteriaReplacement(unittest.TestCase):
         self.assertEqual(tune.subset_accuracy(results, {"old-1", "old-2", "old-3", "old-4"}), 0.5)
         self.assertEqual(tune.subset_accuracy(results, set()), 0.0)
 
+    def test_verdicts_are_matched_to_rows_by_id(self):
+        rows = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        judgements = [{"id": "c", "label_correct": False}, {"id": "a", "label_correct": True}]
+        paired = tune.pair_verdicts(rows, judgements)
+        self.assertEqual([v.get("label_correct") for _r, v in paired], [True, None, False])
+
+    def test_verdicts_without_ids_are_still_paired_by_position(self):
+        paired = tune.pair_verdicts([{"id": "a"}, {"id": "b"}], [{"x": 1}, {"x": 2}])
+        self.assertEqual([v["x"] for _r, v in paired], [1, 2])
+
 if __name__ == "__main__":
     unittest.main()

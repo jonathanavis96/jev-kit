@@ -613,6 +613,23 @@ def build_judge_prompt(rows):
     )
 
 
+def pair_verdicts(rows, judgements):
+    """(row, verdict) for every row, matched by the id the prompt gave it.
+
+    Paired by position, one omitted or reordered verdict shifted every
+    later one onto the wrong row. A row with no verdict of its own gets an
+    empty one, which normalise_verdict reads as cannot_tell. Only a judge
+    that returned no ids at all is paired by position, as before."""
+    by_id = {}
+    for v in judgements:
+        if isinstance(v, dict) and isinstance(v.get("id"), str):
+            by_id.setdefault(v["id"], v)
+    if not by_id:
+        return list(zip(rows, judgements))
+    return [(row, by_id.get(row.get("id") or "row-%d" % i, {}))
+            for i, row in enumerate(rows)]
+
+
 def normalise_verdict(verdict, row, index):
     """One judge answer, reduced to the fields this run acts on.
 
@@ -1237,7 +1254,7 @@ def main():
 
     run_verdicts = []
     wrong = []
-    for index, (row, verdict) in enumerate(zip(judge_rows, judgements)):
+    for index, (row, verdict) in enumerate(pair_verdicts(judge_rows, judgements)):
         normalised = normalise_verdict(verdict, row, index)
         run_verdicts.append(normalised)
         if normalised["wrong"]:
