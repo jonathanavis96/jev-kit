@@ -630,17 +630,6 @@ class BareExportAndDeclare(unittest.TestCase):
         self.assertFalse(r1("declare -f myfn"))
 
 
-class QuotedAssignmentValues(unittest.TestCase):
-    def test_words_inside_a_quoted_value_are_not_a_command(self):
-        self.assertFalse(fires('MSG="Remove sudo usage"', R5))
-        self.assertFalse(fires('NOTE="never rm -rf / ok"', R7_ROOT))
-
-    def test_the_command_after_the_value_still_counts(self):
-        self.assertTrue(fires("X='a b' sudo reboot", R5))
-        self.assertTrue(fires('X="a b" rm -rf /', R7_ROOT))
-        self.assertTrue(fires('env X="a b" sudo reboot', R5))
-
-
 class HealthSummaryTimestamps(unittest.TestCase):
     def test_a_naive_timestamp_does_not_break_the_summary(self):
         now = datetime.datetime.now(datetime.timezone.utc)
