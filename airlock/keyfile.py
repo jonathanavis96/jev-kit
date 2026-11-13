@@ -242,8 +242,17 @@ def pointer_target(check=True, windows=None):
                 return None
             parent = os.path.dirname(pointer) or "."
             try:
-                dir_st = os.lstat(parent)
+                link_st = os.lstat(parent)
+                # The directory a symlink leads to is what holds the pointer,
+                # so it is what gets checked. A symlink's own mode is always
+                # 777 on Linux, and checking that rejected every config dir
+                # reached through one (migrate-to-airlock.sh leaves them).
+                dir_st = os.stat(parent)
             except Exception:
+                return None
+            if stat.S_ISLNK(link_st.st_mode) and link_st.st_uid != os.getuid():
+                _note("ignoring pointer: pointer directory %s is a symlink owned by uid %d, not %d"
+                      % (parent, link_st.st_uid, os.getuid()))
                 return None
             if not _owned_and_unwritable(dir_st, "pointer directory", parent):
                 return None

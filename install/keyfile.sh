@@ -40,7 +40,12 @@ airlock_keyfile_trusted_file() {
 airlock_keyfile_trusted_dir() {
   local p="$1" info uid mode
   [ -d "$p" ] || return 1
-  info="$(stat -c '%u %a' "$p" 2>/dev/null)" || return 1
+  # A symlinked directory is judged by where it leads (-L): the link's own
+  # mode is always 777. The link itself must still be ours.
+  if [ -L "$p" ]; then
+    [ "$(stat -c '%u' "$p" 2>/dev/null)" = "$(id -u)" ] || return 1
+  fi
+  info="$(stat -L -c '%u %a' "$p" 2>/dev/null)" || return 1
   uid="${info%% *}"
   mode="${info##* }"
   [ "$uid" = "$(id -u)" ] || return 1

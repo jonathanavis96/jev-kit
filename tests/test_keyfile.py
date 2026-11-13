@@ -7,6 +7,7 @@ import tests  # noqa: F401, I001 -- MUST be the first import. `python3 -m unitte
 # AIRLOCK_*-isolating fixture before any airlock.* module resolves a real path.
 
 import os
+import subprocess
 import pathlib
 import tempfile
 import unittest
@@ -231,6 +232,44 @@ class TestPointerTrust(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             got, _ = self._target(home, dir_mode=0o707)
             self.assertIsNone(got)
+
+    def test_a_config_dir_reached_through_a_symlink_is_followed(self):
+        """migrate-to-airlock.sh leaves the old names as symlinks; a symlink's
+        own mode is 777, so checking it refused every such pointer."""
+        with tempfile.TemporaryDirectory() as home:
+            real, target = self._fixture(home)
+            link = pathlib.Path(home) / ".config" / "jev-guard"
+            link.symlink_to(real)
+            expanduser, config_file = self._patched(home, link)
+            with expanduser, config_file:
+                self.assertEqual(keyfile.pointer_target(), target)
+
+    def test_a_symlink_to_a_writable_dir_is_still_ignored(self):
+        with tempfile.TemporaryDirectory() as home:
+            real, _ = self._fixture(home, dir_mode=0o777)
+            link = pathlib.Path(home) / ".config" / "jev-guard"
+            link.symlink_to(real)
+            expanduser, config_file = self._patched(home, link)
+            with expanduser, config_file:
+                self.assertIsNone(keyfile.pointer_target())
+
+    def test_the_shell_helper_follows_a_symlinked_config_dir(self):
+        with tempfile.TemporaryDirectory() as home:
+            real, target = self._fixture(home)
+            link = pathlib.Path(home) / ".config" / "jev-guard"
+            link.symlink_to(real)
+            sh = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "install", "keyfile.sh")
+            out = subprocess.run(
+                ["bash", "-c", '. "$1"; airlock_keyfile_trusted_dir "$2" && echo yes', "_",
+                 sh, str(link)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(out.stdout.strip(), "yes")
+            os.chmod(real, 0o777)
+            out = subprocess.run(
+                ["bash", "-c", '. "$1"; airlock_keyfile_trusted_dir "$2" && echo yes', "_",
+                 sh, str(link)], capture_output=True, text=True, timeout=10)
+            os.chmod(real, 0o700)
+            self.assertEqual(out.stdout.strip(), "")
 
     def test_symlinked_pointer_is_ignored(self):
         with tempfile.TemporaryDirectory() as home:
