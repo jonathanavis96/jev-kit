@@ -551,6 +551,46 @@ class TestSessionCheckOnWindows(WireTestBase):
         self.assertEqual(Path(path).read_text(), before)
 
 
+class TestWindowsShellShapeFollowsTheInstall(WireTestBase):
+    """Git for Windows installed (or removed) after airlock: a re-wire must
+    switch the call operator, or bash reads `& ...` as a syntax error, exits 2
+    and blocks every tool call."""
+
+    WIN_LAUNCHER = "C:\\Users\\Someone\\AppData\\Local\\airlock\\airlock-hook.py"
+    WIN_PY = "C:\\Windows\\py.exe"
+
+    def _run_win(self, path, command, apply_=True):
+        env = dict(os.environ, NEW_HOOK=self.WIN_LAUNCHER, NEW_HOOK_COMMAND=command,
+                   APPLY="1" if apply_ else "0", BELAY="0", BELAY_WRAPPER="",
+                   FUNCTION_HOOKS="0", HOOK_COMMAND_QUOTED="1", SESSION_CHECK="0",
+                   BROWSE_UNLOCK="0")
+        return subprocess.run([sys.executable, str(WIRE), str(path)],
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def _command(self, path):
+        return self._data(path)["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+    def test_the_call_operator_is_dropped_once_git_bash_is_there(self):
+        bare = '"%s" "%s"' % (self.WIN_PY, self.WIN_LAUNCHER)
+        path = self._file(_settings("& " + bare))
+        self._run_win(path, bare)
+        self.assertEqual(self._command(path), bare)
+
+    def test_the_call_operator_is_added_once_git_bash_is_gone(self):
+        bare = '"%s" "%s"' % (self.WIN_PY, self.WIN_LAUNCHER)
+        path = self._file(_settings(bare))
+        self._run_win(path, "& " + bare)
+        self.assertEqual(self._command(path), "& " + bare)
+
+    def test_the_right_shape_is_left_alone(self):
+        bare = '"%s" "%s"' % (self.WIN_PY, self.WIN_LAUNCHER)
+        path = self._file(_settings(bare))
+        before = Path(path).read_text()
+        out = self._run_win(path, bare)
+        self.assertEqual(Path(path).read_text(), before)
+        self.assertIn("already wired", out.stdout)
+
+
 class TestOneBadFile(WireTestBase):
     def test_an_unwritable_file_is_reported_and_the_rest_still_wired(self):
         blocker = self._file("not a directory")

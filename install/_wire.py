@@ -191,6 +191,28 @@ _WIN_BROWSE_CMD_RE = re.compile(
     r'^((?:[^"]|"[^"]*")*")([^"]*?' + _WIN_BROWSE_TAIL_PARSED + r')(")$')
 
 
+def _shaped(prefix, command=None):
+    """A Windows command prefix in the shell shape this install wants.
+
+    Without Git Bash the hook runs under PowerShell and needs its call
+    operator (`& "py" "launcher"`); with Git Bash it must not have one, or
+    bash reads `&` as a syntax error, exits 2 and blocks every tool call.
+    Which one applies follows from NEW_HOOK_COMMAND, the command the
+    installer built for this machine, so installing or removing Git for
+    Windows and re-running --wire fixes the shape instead of keeping the old
+    one. `command` is the command built for the hook being repointed (the
+    guard's by default). POSIX prefixes are returned untouched."""
+    if not QUOTED:
+        return prefix
+    want = NEW_HOOK_COMMAND if command is None else command
+    bare = prefix[2:] if prefix.startswith("& ") else prefix
+    return "& " + bare if (want or "").lstrip().startswith("& ") else bare
+
+
+def _shape_ok(prefix, command=None):
+    return _shaped(prefix, command) == prefix
+
+
 def _text_pattern():
     return _WIN_HOOK_PATTERN if QUOTED else _HOOK_PATTERN
 
@@ -378,10 +400,11 @@ def _process_missing(path):
     return True
 
 
-def _repoint_one(text, pattern, new_path):
+def _repoint_one(text, pattern, new_path, command=None):
     if QUOTED:
         def _replace(match):
-            return '"%s%s%s"' % (match.group(1), _json_inner(new_path), match.group(3))
+            return '"%s%s%s"' % (_shaped(match.group(1), command), _json_inner(new_path),
+                                 match.group(3))
     else:
         def _replace(match):
             return '"%s%s"' % (match.group(1), _json_inner(new_path))
@@ -399,13 +422,15 @@ def _repoint_text(text):
     edit."""
     text = _repoint_one(text, _text_pattern(), NEW_HOOK)
     if SESSION_CHECK_HOOK:
-        text = _repoint_one(text, _session_text_pattern(), SESSION_CHECK_HOOK)
+        text = _repoint_one(text, _session_text_pattern(), SESSION_CHECK_HOOK,
+                            SESSION_CHECK_COMMAND)
     if BROWSE_UNLOCK_HOOK:
-        text = _repoint_one(text, _browse_text_pattern(), BROWSE_UNLOCK_HOOK)
+        text = _repoint_one(text, _browse_text_pattern(), BROWSE_UNLOCK_HOOK,
+                            BROWSE_UNLOCK_COMMAND)
     return text
 
 
-def _structural_repoint(data, pattern=None, new_path=None):
+def _structural_repoint(data, pattern=None, new_path=None, command=None):
     """Walk hooks.PreToolUse (and, defensively, every hook block) and
     repoint any command whose path is an old airlock/plumbline/jev_guard
     hook path, in place. Returns True if anything changed.
@@ -430,9 +455,9 @@ def _structural_repoint(data, pattern=None, new_path=None):
                 if not isinstance(cmd, str):
                     continue
                 m = pattern.match(cmd)
-                if m and m.group(2) != new_path:
+                if m and (m.group(2) != new_path or not _shape_ok(m.group(1), command)):
                     tail = m.group(3) if QUOTED else ""
-                    h["command"] = m.group(1) + new_path + tail
+                    h["command"] = _shaped(m.group(1), command) + new_path + tail
                     changed = True
     return changed
 
@@ -452,7 +477,8 @@ def process(path):
 
     matches = [(m[0], m[1]) for m in _text_pattern().findall(text)]
     needs_repoint = bool(matches) and not all(
-        hook_path == _json_inner(NEW_HOOK) for _prefix, hook_path in matches)
+        hook_path == _json_inner(NEW_HOOK) and _shape_ok(prefix)
+        for prefix, hook_path in matches)
     needs_add_pretooluse = not matches
 
     belay_ok = BELAY and bool(BELAY_WRAPPER) and os.path.isfile(BELAY_WRAPPER)
@@ -475,8 +501,8 @@ def process(path):
     session_matches = [(m[0], m[1]) for m in _session_text_pattern().findall(text)]
     needs_add_session = session_ok and not session_matches
     needs_repoint_session = bool(session_matches) and SESSION_CHECK_HOOK and not all(
-        hook_path == _json_inner(SESSION_CHECK_HOOK)
-        for _prefix, hook_path in session_matches)
+        hook_path == _json_inner(SESSION_CHECK_HOOK) and _shape_ok(prefix, SESSION_CHECK_COMMAND)
+        for prefix, hook_path in session_matches)
 
     # The PostToolUse browse unlock, the same two questions again.
     browse_ok = _browse_unlock_ok()
@@ -488,8 +514,8 @@ def process(path):
                             if browse_ok and not _event_has_browse(data, e)]
     needs_add_browse = bool(browse_events_to_add)
     needs_repoint_browse = bool(browse_matches) and BROWSE_UNLOCK_HOOK and not all(
-        hook_path == _json_inner(BROWSE_UNLOCK_HOOK)
-        for _prefix, hook_path in browse_matches)
+        hook_path == _json_inner(BROWSE_UNLOCK_HOOK) and _shape_ok(prefix, BROWSE_UNLOCK_COMMAND)
+        for prefix, hook_path in browse_matches)
 
     needs_repoint = needs_repoint or needs_repoint_session or needs_repoint_browse
     needs_add = (needs_add_pretooluse or needs_add_session or needs_add_browse
@@ -526,20 +552,20 @@ def process(path):
         # Only the hooks this run was actually told where to find are counted
         # or printed: _repoint_text leaves the others alone, so counting them
         # would report an edit that did not happen.
-        pairs = [(m, NEW_HOOK) for m in matches]
+        pairs = [(m, NEW_HOOK, NEW_HOOK_COMMAND) for m in matches]
         total = len(matches)
         if SESSION_CHECK_HOOK:
-            pairs += [(m, SESSION_CHECK_HOOK) for m in session_matches]
+            pairs += [(m, SESSION_CHECK_HOOK, SESSION_CHECK_COMMAND) for m in session_matches]
             total += len(session_matches)
         if BROWSE_UNLOCK_HOOK:
-            pairs += [(m, BROWSE_UNLOCK_HOOK) for m in browse_matches]
+            pairs += [(m, BROWSE_UNLOCK_HOOK, BROWSE_UNLOCK_COMMAND) for m in browse_matches]
             total += len(browse_matches)
         if not APPLY:
             print("%s: would repoint %d hook path(s)" % (path, total))
-            for (prefix, hook_path), target in sorted(set(pairs)):
-                if hook_path != target:
+            for (prefix, hook_path), target, command in sorted(set(pairs)):
+                if hook_path != target or not _shape_ok(prefix, command):
                     print("  - %s%s" % (prefix, hook_path))
-                    print("    -> %s%s" % (prefix, target))
+                    print("    -> %s%s" % (_shaped(prefix, command), target))
             return True
         backup = _backup(path)
         with open(path, "w", encoding="utf-8") as f:
@@ -557,11 +583,11 @@ def process(path):
         if _structural_repoint(new_data):
             actions.append("repointed %d existing hook path(s) to %s" % (len(matches), NEW_HOOK))
         if needs_repoint_session and _structural_repoint(
-                new_data, _session_cmd_pattern(), SESSION_CHECK_HOOK):
+                new_data, _session_cmd_pattern(), SESSION_CHECK_HOOK, SESSION_CHECK_COMMAND):
             actions.append("repointed %d session-check hook path(s) to %s"
                            % (len(session_matches), SESSION_CHECK_HOOK))
         if needs_repoint_browse and _structural_repoint(
-                new_data, _browse_cmd_pattern(), BROWSE_UNLOCK_HOOK):
+                new_data, _browse_cmd_pattern(), BROWSE_UNLOCK_HOOK, BROWSE_UNLOCK_COMMAND):
             actions.append("repointed %d browse-unlock hook path(s) to %s"
                            % (len(browse_matches), BROWSE_UNLOCK_HOOK))
     if needs_add_pretooluse:
