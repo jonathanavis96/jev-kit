@@ -625,6 +625,14 @@ class ReaderOperandsFailSafe(unittest.TestCase):
         for c in ("tee out < .env", "< .env tee out"):
             self.assertTrue(r1(c), c)
 
+    def test_an_input_redirection_in_an_output_target_word_is_read(self):
+        """Redirections can share one word: `2>/dev/null<.env` writes
+        stderr to /dev/null and reads .env on stdin."""
+        for c in ("cat 2>/dev/null<.env", "cat >/dev/null<.env", "cat >out<.env",
+                  "cat 1>&2<.env", "cat >a<.env>b", "cat >a<b<.env",
+                  "tee out 2>/dev/null<.env", "grep x 2>/dev/null<.env"):
+            self.assertTrue(r1(c), c)
+
     def test_a_quoted_redirect_sign_is_an_argument(self):
         for c in ('grep ">" .env', "grep '>' .env > out", 'cat ">" .env'):
             self.assertTrue(r1(c), c)

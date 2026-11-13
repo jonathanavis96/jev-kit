@@ -1130,7 +1130,13 @@ def _read_operands(prog, args, seg=""):
                 continue
             m = _OUTPUT_REDIRECT_RE.match(a)
             if m:
-                skip_next = not m.group(1)
+                target = m.group(1)
+                skip_next = not target
+                # Redirections can share one word (`2>/dev/null<.env`):
+                # every `<` in the target starts an input redirection, and
+                # the file it names is read, so it stays an operand.
+                out.extend(src for src in re.findall(r"<([^<>]*)", target)
+                           if src)
                 continue
             out.append(a)
     script_opts = _PATTERN_FIRST.get(prog)
