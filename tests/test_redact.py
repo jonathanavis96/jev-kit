@@ -141,10 +141,6 @@ class TestRedact(unittest.TestCase):
         out = redact.redact("blob=%s" % b64)
         self.assertNotIn(b64, out)
 
-    def test_a_long_word_path_is_not_a_base64_run(self):
-        path = "/home/someone/code/project/src/components/Button"
-        self.assertEqual(redact.redact("cat %s" % path), "cat %s" % path)
-
     def test_short_strings_untouched(self):
         text = "run the tests and check status"
         self.assertEqual(redact.redact(text), text)

@@ -84,22 +84,9 @@ _PATTERNS = [
     re.compile(r"Bearer\s+\S+"),
     # Bare 32+ char hex run (not already part of a matched token above)
     re.compile(r"(?<![A-Za-z0-9])[A-Fa-f0-9]{32,}(?![A-Za-z0-9])"),
+    # Bare 32+ char base64-ish run
+    re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])"),
 ]
-
-# Bare 32+ char base64-ish run. Kept apart from _PATTERNS because `/` is in
-# the alphabet, so a long file path matched it whole.
-_BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])")
-
-
-def _redact_base64_run(match):
-    """A run with a `/` but no digit and no `+` is a path made of words
-    (`home/user/code/project/src/components`), not encoded bytes: 32 random
-    base64 characters avoid every digit and `+` about one time in 400, and
-    must also contain a `/`. A path with a digit in it is still redacted."""
-    run = match.group(0)
-    if "/" in run and not any(c.isdigit() or c == "+" for c in run):
-        return run
-    return REDACTED
 
 
 def redact(text):
@@ -112,7 +99,6 @@ def redact(text):
             out = pattern.sub(_redact_value, out)
         for pattern in _PATTERNS:
             out = pattern.sub(REDACTED, out)
-        out = _BASE64_RUN.sub(_redact_base64_run, out)
         return out
     except Exception:
         # Fail safe toward over-redaction, never toward leaking the input as-is.
