@@ -220,6 +220,47 @@ def read_uptime_seconds(system=None, proc_uptime="/proc/uptime", ticks=None,
         return None
 
 
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
+
+def awake_age_seconds(row, boot_id=None, mono=None, boot_id_path=BOOT_ID_PATH):
+    """Seconds the machine has been AWAKE since the health row was written,
+    or None when that cannot be known (no boot_id/mono_s in the row, another
+    boot, or no boot id here: Windows and macOS).
+
+    Uptime counts suspended time, so after a laptop resumed from a night's
+    sleep the row looked hours old and the uptime long, and the session
+    started in the minutes before the timer's next run warned that the timer
+    "may have stopped". The monotonic clock stops during suspend.
+    """
+    try:
+        if not isinstance(row, dict):
+            return None
+        then, row_boot = row.get("mono_s"), row.get("boot_id")
+        if not row_boot or isinstance(then, bool) or not isinstance(then, (int, float)):
+            return None
+        if boot_id is None:
+            with open(boot_id_path, "r") as f:
+                boot_id = f.read().strip()
+        if boot_id != row_boot:
+            return None
+        if mono is None:
+            mono = time.monotonic()
+        return max(0.0, float(mono) - float(then))
+    except Exception:
+        return None
+
+
+def is_stale(age, awake_age):
+    """No row, or a row older than STALE_AFTER_S by the wall clock AND (when
+    it is known) by the time the machine was awake."""
+    if age is None:
+        return True
+    if age <= STALE_AFTER_S:
+        return False
+    return awake_age is None or awake_age > STALE_AFTER_S
+
+
 def last_json_line(path, tail_bytes=65536):
     """The last parseable JSON object in a .jsonl file, or None.
 
@@ -441,7 +482,8 @@ def collect_facts(deadline=None, environ=None, windows=None, now=None):
     now = time.time() if now is None else now
     facts = {
         "mode": "shadow", "kill_switch": None, "key_ok": True,
-        "health_row": None, "health_age_s": None, "uptime_s": None,
+        "health_row": None, "health_age_s": None, "health_awake_age_s": None,
+        "uptime_s": None,
         "health_timer": False, "release_ok": None,
         "tuning_installed": False, "tune_category": None,
         "doctor": doctor_command(paths_mod, windows=windows),
@@ -478,6 +520,7 @@ def collect_facts(deadline=None, environ=None, windows=None, now=None):
         ts = parse_ts(row.get("ts"))
         if ts is not None:
             facts["health_age_s"] = max(0.0, now - ts)
+        facts["health_awake_age_s"] = awake_age_seconds(row)
 
     if over():
         return facts
@@ -485,7 +528,7 @@ def collect_facts(deadline=None, environ=None, windows=None, now=None):
     # Staleness is the expensive branch (uptime, then possibly a subprocess on
     # Windows), so it is only entered once the cheap arithmetic says the row
     # really is old -- or missing entirely.
-    stale = facts["health_age_s"] is None or facts["health_age_s"] > STALE_AFTER_S
+    stale = is_stale(facts["health_age_s"], facts["health_awake_age_s"])
     if stale:
         facts["uptime_s"] = read_uptime_seconds()
         facts["health_timer"] = health_timer_installed(paths_mod, windows=windows)
@@ -550,7 +593,7 @@ def choose_warning(facts):
 
     age = facts.get("health_age_s")
     uptime = facts.get("uptime_s")
-    if (age is None or age > STALE_AFTER_S):
+    if is_stale(age, facts.get("health_awake_age_s")):
         if facts.get("health_timer"):
             # Uptime unknown is NO evidence: say nothing rather than guess.
             if uptime is not None and uptime > MIN_UPTIME_S:
