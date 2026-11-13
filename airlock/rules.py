@@ -1088,6 +1088,8 @@ def _only_plain_flags(prog, flags):
 _OUTPUT_REDIRECT_RE = re.compile(r"^(?:\d*>>?|&>>?|>\|)(.*)$")
 # An input redirection in the raw text: `< f`, `0<f`, never `<<` or `<(`.
 _INPUT_REDIRECT_RE = re.compile(r"(?<![<\d])\d*<(?![<(&])")
+# The file named by each `<` inside one word, up to the next redirection.
+_ATTACHED_INPUT_RE = re.compile(r"<+([^<>]*)")
 
 
 def _pattern_from_option(script_opts, args):
@@ -1114,10 +1116,14 @@ def _read_operands(prog, args, seg=""):
     `tee out < .env` reads .env. When in doubt the operand stays, which only
     ever denies more."""
     code = _QUOTED_RE.sub('""', seg or "")
+    # Redirections can share a word with anything (`grep foo<.env`,
+    # `cat 2>/dev/null<.env`, `cat > out<.env`): the file after each `<`
+    # is read, so it is kept whatever is dropped from the word around it.
+    sources = [src for a in args for src in _ATTACHED_INPUT_RE.findall(a) if src]
     if prog == "tee":
         # tee reads only its stdin. With an input redirection anywhere in
         # the segment, which word is the input is left to the full check.
-        return list(args) if _INPUT_REDIRECT_RE.search(code) else []
+        return (list(args) if _INPUT_REDIRECT_RE.search(code) else []) + sources
     out = list(args)
     quoted_operator = any(_OUTPUT_REDIRECT_RE.match(q[1:-1])
                           for q in _QUOTED_RE.findall(seg or ""))
@@ -1130,13 +1136,7 @@ def _read_operands(prog, args, seg=""):
                 continue
             m = _OUTPUT_REDIRECT_RE.match(a)
             if m:
-                target = m.group(1)
-                skip_next = not target
-                # Redirections can share one word (`2>/dev/null<.env`):
-                # every `<` in the target starts an input redirection, and
-                # the file it names is read, so it stays an operand.
-                out.extend(src for src in re.findall(r"<([^<>]*)", target)
-                           if src)
+                skip_next = not m.group(1)
                 continue
             out.append(a)
     script_opts = _PATTERN_FIRST.get(prog)
@@ -1152,7 +1152,7 @@ def _read_operands(prog, args, seg=""):
                 if _only_plain_flags(prog, out[:i]):
                     del out[i]
                 break
-    return out
+    return out + sources
 
 
 def _spaced_quoted_words(seg):
