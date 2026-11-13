@@ -388,6 +388,14 @@ def ensure_tune_worktree(main_repo):
         if not _worktree_belongs_to(WORKTREE_DIR, main_repo):
             retire_foreign_worktree(WORKTREE_DIR)
         else:
+            # A run that died part-way leaves its edits (cases.jsonl,
+            # questions.py) uncommitted here, and git refuses to rebase a
+            # dirty tree, so every later run failed at this point for good.
+            # Nothing uncommitted in this worktree is anyone's work but a
+            # previous run's, so it is dropped first.
+            run(["git", "-C", str(WORKTREE_DIR), "rebase", "--abort"], check=False)
+            run(["git", "-C", str(WORKTREE_DIR), "reset", "-q"], check=False)
+            worktree_discard_changes()
             # Rebase auto-tune onto the base branch. On conflict, abort and report.
             run(["git", "-C", str(WORKTREE_DIR), "fetch", str(main_repo), "%s:refs/heads/tune-main-ref" % BASE_BRANCH])
             proc = run(
