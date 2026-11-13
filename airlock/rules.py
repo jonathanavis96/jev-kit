@@ -1889,23 +1889,6 @@ def _is_named_install(rest):
     return (prog in _PKG_INSTALLERS and len(rest) > 2 and rest[1] in _PKG_SUBS)
 
 
-def _with_handed_segments(segments, depth=0, work=None):
-    """`segments`, plus those of any code they hand to a shell: `bash -c
-    'sudo rm -rf /etc/x'` runs sudo as surely as typing it does."""
-    work = work or _ScanWork()
-    out = list(segments)
-    if depth >= _HANDED_CODE_DEPTH:
-        return out
-    for seg in segments:
-        try:
-            code = _handed_code(seg)
-        except Exception:
-            code = None
-        if code and work.spend(code, (code, depth)):
-            out.extend(_with_handed_segments(all_segments(strip_heredocs(code)), depth + 1, work))
-    return out
-
-
 def prefilter_sudo(ctx):
     if ctx["tool_name"] not in SHELL_TOOLS:
         return None
@@ -1913,7 +1896,7 @@ def prefilter_sudo(ctx):
     # the index refresh is part of it. Only allowed when the same command
     # carries the named install itself.
     has_named_install = False
-    segments = _with_handed_segments(_run_segments(ctx))
+    segments = _run_segments(ctx)
     for seg in segments:
         prog0, args0 = program_of(seg)
         if prog0 == "sudo" and _is_named_install(_sudo_rest(["sudo"] + args0, 0)):
@@ -2301,11 +2284,6 @@ def _rd_unquote(tok):
     `/*`. An escaped leading tilde is a file literally named `~`, so it is
     kept escaped and never matches the home directory."""
     out, i, n = [], 0, len(tok)
-    if n > 1 and tok[0] in "'\"" and tok[1] == "~":
-        # A quoted leading tilde is literal too: `rm -rf "~"` removes a file
-        # named ~, and bash never expands it to the home directory.
-        out.append("\\~")
-        i = 2
     while i < n:
         ch = tok[i]
         if ch == "\\" and i + 1 < n:
@@ -2523,9 +2501,7 @@ def _stdin_scripts(text):
 
 
 def _rd_hit(seg):
-    # Raw words, not words(): that strips a word's quotes, and `"~"` must
-    # reach _rd_unquote still quoted to stay a file literally named ~.
-    prog, args = _rd_command((seg or "").split())
+    prog, args = _rd_command(words(seg))
     if prog != "rm":
         return None
     args = [_rd_unquote(a) for a in args]
@@ -2655,10 +2631,6 @@ R9_SUGGESTION = (
 )
 
 
-_COMMIT_MESSAGE_RE = re.compile(
-    r"""((?<!\S)-[a-zA-Z]*m|--message)(?:=|\s+)(?:"(?:[^"\\]|\\.)*"|'[^']*')""")
-
-
 def prefilter_commit_secret(ctx):
     """Two belts, both pure code, both offline.
 
@@ -2692,14 +2664,6 @@ def prefilter_commit_secret(ctx):
         if i is None or args[i] not in ("add", "commit", "stage"):
             continue
         git_write = True
-        if args[i] == "commit":
-            # The message is text, not paths: `git commit -m "ignore .env"`
-            # stages nothing named .env. Its words are dropped here; the
-            # credential-literal belt below still reads the whole command.
-            prog, args = program_of(_COMMIT_MESSAGE_RE.sub(r"\1 ''", seg))
-            i = _first_positional(args, _GIT_VALUE_OPTS)
-            if i is None:
-                continue
         hit = _secret_path_in(args[i + 1:])
         if hit:
             return Match("`git %s` would stage a secret file (%s)" % (args[i], hit), R9_SUGGESTION)
