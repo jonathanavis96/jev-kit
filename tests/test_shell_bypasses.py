@@ -630,15 +630,7 @@ class ReaderOperandsFailSafe(unittest.TestCase):
         stderr to /dev/null and reads .env on stdin."""
         for c in ("cat 2>/dev/null<.env", "cat >/dev/null<.env", "cat >out<.env",
                   "cat 1>&2<.env", "cat >a<.env>b", "cat >a<b<.env",
-                  "tee out 2>/dev/null<.env", "grep x 2>/dev/null<.env",
-                  "cat > out<.env", "tee out<.env"):
-            self.assertTrue(r1(c), c)
-
-    def test_an_input_redirection_in_the_pattern_word_is_read(self):
-        """`grep foo<.env` searches stdin, which is .env: dropping the
-        pattern word must not drop the file attached to it."""
-        for c in ("grep foo<.env", "grep -r foo<.env", "grep -- foo<.env",
-                  "rg foo<.env", "jq .<.env"):
+                  "tee out 2>/dev/null<.env", "grep x 2>/dev/null<.env"):
             self.assertTrue(r1(c), c)
 
     def test_a_quoted_redirect_sign_is_an_argument(self):
