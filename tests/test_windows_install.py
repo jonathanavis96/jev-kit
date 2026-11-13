@@ -8,6 +8,7 @@ Windows (the `mklink /J` junction, `schtasks`) is allowed to fail and is
 asserted to fail SOFTLY -- that is the actual requirement: the text pointer
 has to carry the install when the junction cannot be made.
 """
+import io
 import json
 import os
 import shutil
@@ -242,6 +243,25 @@ class TestInstallerEndToEnd(unittest.TestCase):
         self.assertIsNotNone(resolved)
         self.assertTrue(os.path.isfile(os.path.join(resolved, "hooks", "airlock.py")))
 
+    def test_a_rollback_in_current_txt_wins_over_the_junction(self):
+        """The documented rollback is one edit of current.txt. Read after the
+        junction, it changed nothing on a machine that had a junction."""
+        home = os.path.join(self.tmp, "home")
+        old_release = os.path.join(home, "releases", "old")
+        new_release = os.path.join(home, "current")  # stands in for the junction
+        os.makedirs(old_release)
+        os.makedirs(new_release)
+        with open(os.path.join(home, "current.txt"), "w") as f:
+            f.write(old_release + "\n")
+        with mock.patch.dict(os.environ, self.env, clear=False):
+            self.assertEqual(wc.resolve_current(), old_release)
+        ns = {"__file__": os.path.join(home, "airlock-hook.py")}
+        exec(compile(wc.LAUNCHER_SOURCE.replace('if __name__ == "__main__":', "if False:"),
+                     "launcher", "exec"), ns)
+        self.assertEqual(ns["_release_root"](), old_release)
+        os.remove(os.path.join(home, "current.txt"))
+        self.assertEqual(ns["_release_root"](), new_release)
+
     def test_the_release_copy_leaves_the_repository_noise_behind(self):
         self._install()
         with open(os.path.join(self.tmp, "home", "current.txt")) as f:
@@ -317,6 +337,29 @@ class TestInstallerEndToEnd(unittest.TestCase):
             self.assertTrue(os.path.isdir(path), path)
 
 
+class TestReleasePruning(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_a_copied_release_is_stamped_now_not_with_the_source_mtime(self):
+        src = os.path.join(self.tmp, "src")
+        os.makedirs(src)
+        os.utime(src, (1000000000, 1000000000))
+        dest = wc.copy_release(src, os.path.join(self.tmp, "rel"))
+        self.assertGreater(os.path.getmtime(dest), 1000000000 + 86400)
+
+    def test_equal_mtimes_keep_the_newest_stamps(self):
+        releases = os.path.join(self.tmp, "releases")
+        names = ["20261101T000000", "20261102T000000", "20261103T000000", "20261104T000000"]
+        for n in names:
+            os.makedirs(os.path.join(releases, n))
+            os.utime(os.path.join(releases, n), (1000000000, 1000000000))
+        pruned = wc.prune_releases(releases, keep=2)
+        self.assertEqual(sorted(os.listdir(releases)), names[2:])
+        self.assertEqual(sorted(os.path.basename(p) for p in pruned), names[:2])
+
+
 class TestUninstall(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airlock-win-uninstall-test-")
@@ -364,6 +407,19 @@ class TestUninstall(unittest.TestCase):
         self._uninstall("--purge")
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "cfg")))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "state")))
+
+    def test_purge_says_it_kept_the_shared_kit_key_file(self):
+        kit = os.path.join(self.tmp, "kit")
+        os.makedirs(kit)
+        with open(os.path.join(kit, "env"), "w") as f:
+            f.write("TYPESAFE_API_KEY=x\n")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, dict(self.env, JEVKIT_CONFIG_DIR=kit), clear=False), \
+             mock.patch("sys.stdout", out):
+            windows_uninstall.main(["--purge"])
+        self.assertTrue(os.path.isfile(os.path.join(kit, "env")))
+        self.assertNotIn("INCLUDING THE KEY FILE", out.getvalue())
+        self.assertIn("kept the kit key file", out.getvalue())
 
     def test_only_airlocks_own_hook_is_removed(self):
         with open(self.settings) as f:

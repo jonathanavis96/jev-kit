@@ -571,6 +571,38 @@ class NestedCodeStaysCheap(unittest.TestCase):
             self.assertTrue(fires("eval cat .env; rm -rf /", R7_ROOT))
 
 
+class LineContinuations(unittest.TestCase):
+    def test_a_continuation_after_an_operator_hides_nothing(self):
+        for c, rule in (("ls &&\\\nsudo rm -rf /etc", R5),
+                        ("echo x |\\\nsudo tee /etc/x", R5),
+                        ("\\\nsudo reboot", R5),
+                        ("true;\\\nrm -rf /", R7_ROOT),
+                        ("rm -rf \\\n  /", R7_ROOT)):
+            self.assertTrue(fires(c, rule), repr(c))
+
+    def test_a_continuation_inside_single_quotes_stays_text(self):
+        self.assertFalse(fires("echo 'a &&\\\nsudo reboot'", R5))
+
+
+class QuotedPathWithASpace(unittest.TestCase):
+    def test_a_secret_file_under_a_spaced_directory_is_caught(self):
+        for c in ('cat "/home/u/My Project/.env"', "head -5 '/home/u/My Project/.env'"):
+            self.assertTrue(r1(c), c)
+
+    def test_an_ordinary_spaced_path_is_not(self):
+        self.assertFalse(r1('cat "/home/u/My Project/notes.txt"'))
+
+
+class BareExportAndDeclare(unittest.TestCase):
+    def test_bare_export_and_declare_dump_the_environment(self):
+        for c in ("export", "declare", "export | grep KEY"):
+            self.assertTrue(r1(c), c)
+
+    def test_setting_a_variable_is_not_a_dump(self):
+        self.assertFalse(r1("export FOO=1"))
+        self.assertFalse(r1("declare -f myfn"))
+
+
 class HealthSummaryTimestamps(unittest.TestCase):
     def test_a_naive_timestamp_does_not_break_the_summary(self):
         now = datetime.datetime.now(datetime.timezone.utc)

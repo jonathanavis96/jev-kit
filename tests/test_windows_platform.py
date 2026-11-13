@@ -223,6 +223,15 @@ class TestPermissions(unittest.TestCase):
         self.assertIn("ACL", text)
         self.assertNotIn("mode", text.split("ACL")[0])
 
+    def test_a_sibling_of_the_profile_is_not_inside_it(self):
+        with mock.patch.dict(os.environ, {"USERPROFILE": "C:\\Users\\al"}):
+            ok, _ = platform_compat.describe_permissions(
+                "C:\\Users\\alice\\AppData\\Roaming\\airlock\\env", windows=True)
+            self.assertFalse(ok)
+            ok, _ = platform_compat.describe_permissions(
+                "c:/users/AL/AppData/Roaming/airlock/env", windows=True)
+            self.assertTrue(ok)
+
     def test_windows_description_flags_a_path_outside_the_profile(self):
         with mock.patch.dict(os.environ, {"USERPROFILE": "C:\\Users\\someone-else"}):
             ok, text = platform_compat.describe_permissions(self.path, windows=True)

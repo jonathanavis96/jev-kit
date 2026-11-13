@@ -332,7 +332,17 @@ fi
 install_unit() {
   local src="$1" name="$2"
   mkdir -p "$UNIT_DIR"
-  install -m 644 "$src" "$UNIT_DIR/$name"
+  # The unit files name the default home (%h/.local/share/airlock). A custom
+  # AIRLOCK_HOME deploys elsewhere, so it is written into the installed copy;
+  # otherwise the unit would run whatever the default path holds, or nothing.
+  local default_home="%h/.local/share/airlock" content
+  if [ "$AIRLOCK_HOME" != "$HOME/.local/share/airlock" ]; then
+    content="$(cat "$src")"
+    printf '%s\n' "${content//"$default_home"/"$AIRLOCK_HOME"}" > "$UNIT_DIR/$name"
+    chmod 644 "$UNIT_DIR/$name"
+  else
+    install -m 644 "$src" "$UNIT_DIR/$name"
+  fi
   ok "unit $name -> $UNIT_DIR"
 }
 
@@ -578,7 +588,8 @@ EOF
     [ "$WANT_BELAY" = "1" ] && WIRE_EXTRA_FLAGS+=("--belay")
     [ "$WANT_SESSION_CHECK" = "1" ] || WIRE_EXTRA_FLAGS+=("--no-session-check")
     AIRLOCK_HOME="$AIRLOCK_HOME" JEV_HOME="$AIRLOCK_HOME" AIRLOCK_PYTHON3="$PY" \
-      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}"
+      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}" \
+      || warn "wire.sh could not edit every settings.json (see above); the guard is not wired there"
   else
     echo "   No --wire given, so no settings.json was touched. To preview an edit"
     echo "   to an existing entry:"
@@ -640,7 +651,7 @@ if [ "$WANT_TUNING" = "1" ]; then
       printf '# Sourced by tuning/tune.sh. Paths and names only -- never a key.
 '
       if [ -n "$TUNE_JUDGE_BIN" ]; then
-        printf 'AIRLOCK_TUNE_CLAUDE_BIN=%s
+        printf 'AIRLOCK_TUNE_CLAUDE_BIN=%q
 ' "$TUNE_JUDGE_BIN"
       else
         printf '# No `claude` binary found at install time. Set one here:
@@ -651,10 +662,10 @@ if [ "$WANT_TUNING" = "1" ]; then
       printf '# Which Claude account tree the judge bills. Unset = ~/.claude.
 '
       if [ -n "${AIRLOCK_TUNE_CLAUDE_CONFIG_DIR:-}" ]; then
-        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%s
+        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%q
 ' "$AIRLOCK_TUNE_CLAUDE_CONFIG_DIR"
       elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%s
+        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%q
 ' "$CLAUDE_CONFIG_DIR"
       else
         printf '#AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=$HOME/.claude
@@ -663,14 +674,14 @@ if [ "$WANT_TUNING" = "1" ]; then
       printf '# Judge model and effort. Unset = opus / high.
 '
       if [ -n "${AIRLOCK_TUNE_JUDGE_MODEL:-}" ]; then
-        printf 'AIRLOCK_TUNE_JUDGE_MODEL=%s
+        printf 'AIRLOCK_TUNE_JUDGE_MODEL=%q
 ' "$AIRLOCK_TUNE_JUDGE_MODEL"
       else
         printf '#AIRLOCK_TUNE_JUDGE_MODEL=opus
 '
       fi
       if [ -n "${AIRLOCK_TUNE_JUDGE_EFFORT:-}" ]; then
-        printf 'AIRLOCK_TUNE_JUDGE_EFFORT=%s
+        printf 'AIRLOCK_TUNE_JUDGE_EFFORT=%q
 ' "$AIRLOCK_TUNE_JUDGE_EFFORT"
       else
         printf '#AIRLOCK_TUNE_JUDGE_EFFORT=high
@@ -763,6 +774,14 @@ fi
 if [ "$WANT_BELAY" = "1" ]; then
   step "Belay"
   "$REPO_ROOT/belay/install.sh" || warn "belay/install.sh reported a problem"
+  # The guard step wired settings.json before the belay wrapper existed, so
+  # _wire.py skipped the Stop hook then. Now that it is installed, wire again:
+  # _wire.py is idempotent, so this adds the Stop hook and nothing else.
+  if [ "$WANT_GUARD" = "1" ] && [ "${#WIRE_FILES[@]}" -gt 0 ]; then
+    JEV_HOME="$AIRLOCK_HOME" AIRLOCK_HOME="$AIRLOCK_HOME" AIRLOCK_PYTHON3="$PY" \
+      "$SCRIPT_DIR/wire.sh" --apply "${WIRE_EXTRA_FLAGS[@]}" "${WIRE_FILES[@]}" \
+      || warn "wiring the belay Stop hook reported a problem"
+  fi
 fi
 
 if [ "$WANT_COMPACTION" = "1" ]; then

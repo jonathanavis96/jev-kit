@@ -96,6 +96,7 @@ class Child:
             env=env,
         )
         self.requests_served = 0
+        self.retired = False
         self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
@@ -126,6 +127,8 @@ class Child:
         """Send one message, block for the matching result event. Caller
         must retire this child on any exception here."""
         with self._lock:
+            if self.retired:
+                raise _ChildRetired("standing claude child was retired while this request waited")
             stdin = self.proc.stdin
             if stdin is None:
                 raise RuntimeError("standing claude child has no stdin pipe")
@@ -133,7 +136,7 @@ class Child:
             try:
                 stdin.write(line + "\n")
                 stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
+            except (BrokenPipeError, OSError, ValueError) as exc:
                 raise RuntimeError(f"standing claude child stdin closed: {exc}") from None
             try:
                 event = self._queue.get(timeout=timeout)
@@ -159,6 +162,10 @@ class Child:
                 self.proc.wait(timeout=3)
             except Exception:
                 logger.warning("child pid %s (model %s) could not be reaped", self.proc.pid, self.cli_model)
+
+
+class _ChildRetired(RuntimeError):
+    """The child this request queued on was retired before its turn came."""
 
 
 class ModelPool:
@@ -189,6 +196,7 @@ class ModelPool:
             return self._children[self._idx]
 
     def _retire(self, child: Child):
+        child.retired = True
         with self._lock:
             if child in self._children:
                 self._children.remove(child)
@@ -196,13 +204,24 @@ class ModelPool:
         _TRACKED_CHILDREN.discard(child)
 
     def request(self, prompt: str, timeout: float) -> dict:
-        child = self._pick()
-        try:
-            event = child.request(prompt, timeout=timeout)
-        except (TimeoutError, RuntimeError) as exc:
-            logger.warning("child pid=%s failed (%s); retiring", child.proc.pid, exc)
-            self._retire(child)
-            raise
+        # Requests queue on a child's lock. When one of them recycles or
+        # retires that child, the others waiting on it move to another child
+        # instead of failing: the child going away is not their fault.
+        for _attempt in range(3):
+            child = self._pick()
+            try:
+                event = child.request(prompt, timeout=timeout)
+            except _ChildRetired:
+                continue
+            except (TimeoutError, RuntimeError) as exc:
+                if child.retired:
+                    continue
+                logger.warning("child pid=%s failed (%s); retiring", child.proc.pid, exc)
+                self._retire(child)
+                raise
+            break
+        else:
+            raise RuntimeError("no standing claude child could take the request")
         if child.requests_served >= RECYCLE_AFTER:
             logger.info("recycling child pid=%s after %d requests", child.proc.pid, child.requests_served)
             self._retire(child)
@@ -382,17 +401,32 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") != "/v1/chat/completions":
             self._send_json(404, {"error": {"message": f"no such route {self.path}"}})
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"error": {"message": "invalid Content-Length"}})
+            return
+        raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
             req = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             self._send_json(400, {"error": {"message": f"invalid JSON body: {exc}"}})
+            return
+        # A body of the wrong shape raised AttributeError out of this handler
+        # and the client got a dropped connection instead of a 400.
+        if not isinstance(req, dict):
+            self._send_json(400, {"error": {"message": "the JSON body must be an object"}})
             return
 
         model_field = req.get("model", "")
         messages = req.get("messages") or []
         response_format = req.get("response_format")
+        if not isinstance(model_field, str) or not isinstance(messages, list) \
+                or not all(isinstance(m, dict) for m in messages) \
+                or not (response_format is None or isinstance(response_format, dict)):
+            self._send_json(400, {"error": {"message":
+                "expected model: string, messages: list of objects, response_format: object"}})
+            return
         if req.get("stream"):
             self._send_json(400, {"error": {"message": "streaming not implemented by this shim"}})
             return
@@ -402,10 +436,17 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json(400, {"error": {"message": str(exc)}})
             return
-        except (TimeoutError, RuntimeError) as exc:
+        except (TimeoutError, RuntimeError, OSError) as exc:
+            # OSError: the child could not be spawned (no `claude` on PATH).
             with _STATS_LOCK:
                 _STATS["errors"] += 1
             self._send_json(502, {"error": {"message": f"claude CLI backend failed: {exc}"}})
+            return
+        except Exception as exc:
+            with _STATS_LOCK:
+                _STATS["errors"] += 1
+            logger.exception("unexpected failure handling a completion")
+            self._send_json(500, {"error": {"message": f"shim failed: {type(exc).__name__}"}})
             return
 
         usage = result["usage"] or {}

@@ -143,5 +143,22 @@ class TestForeignWorktree(unittest.TestCase):
             self.assertFalse(list(pathlib.Path(home).glob("tune-worktree.retired-*")))
 
 
+    def test_a_dirty_worktree_left_by_a_crashed_run_does_not_block_the_rebase(self):
+        with tempfile.TemporaryDirectory() as home:
+            repo = _make_repo(pathlib.Path(home) / "repo")
+            worktree = pathlib.Path(home) / "tune-worktree"
+            _git("worktree", "add", "-b", "auto-tune", str(worktree), "main", cwd=repo)
+            (worktree / "README").write_text("half-written by a run that died\n")
+            (repo / "NEW").write_text("x\n")
+            _git("add", "NEW", cwd=repo)
+            _git("commit", "-q", "-m", "new on main", cwd=repo)
+
+            with mock.patch.object(tune, "WORKTREE_DIR", worktree), \
+                 mock.patch.object(tune, "BASE_BRANCH", "main"):
+                tune.ensure_tune_worktree(repo)
+
+            self.assertEqual((worktree / "README").read_text(), "hi\n")
+            self.assertTrue((worktree / "NEW").exists())
+
 if __name__ == "__main__":
     unittest.main()

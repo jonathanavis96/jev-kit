@@ -115,6 +115,16 @@ class TestQuestionShape(unittest.TestCase):
         self.assertIn("letter", second["already_decided"])
 
 
+class TestPageRange(unittest.TestCase):
+    def test_a_page_number_below_one_is_refused(self):
+        from docclass import cli
+        for argv in (["x.pdf", "--first", "-2"], ["x.pdf", "--last", "0"]):
+            with mock.patch("sys.stderr"), self.assertRaises(SystemExit) as caught:
+                cli.main(argv)
+            self.assertEqual(caught.exception.code, 2, argv)
+        self.assertEqual(cli._page_number("3"), 3)
+
+
 class TestTwoStages(unittest.TestCase):
     def test_a_confident_two_stage_match(self):
         ask = _ask(("family", "letter", 0.99), ("member", "covering_letter", 0.93))

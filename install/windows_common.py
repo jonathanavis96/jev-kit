@@ -26,7 +26,7 @@ Two mechanisms, in this order:
 
 The hook registered in settings.json points at neither. It points at a small
 stable launcher, `airlock-hook.py`, written once into the install home. The
-launcher resolves `current` (junction first, then `current.txt`) and runs the
+launcher resolves `current.txt` first, then the junction, and runs the
 real hook IN THE SAME PROCESS, so there is no second interpreter start-up to
 pay for. That keeps settings.json stable across every deploy and rollback: a
 rollback rewrites one line of `current.txt` and the next tool call picks it
@@ -81,10 +81,12 @@ settings.json points here and never at a release directory, so a deploy or a
 rollback never has to touch settings.json: it rewrites the `current` pointer
 beside this file and the next tool call follows it.
 
-Resolution order, cheapest first:
-  1. the `current` directory junction, if the installer managed to make one;
-  2. `current.txt`, a one-line file holding the release path, which always
-     works because it needs no filesystem feature and no privilege.
+Resolution order:
+  1. `current.txt`, a one-line file holding the release path, which always
+     works because it needs no filesystem feature and no privilege. It comes
+     first because it is what a rollback edits: read second, the junction
+     would win and the rollback would do nothing;
+  2. the `current` directory junction, if the installer managed to make one.
 
 The real hook is then run IN THIS PROCESS (runpy, __name__ == "__main__"), so
 the indirection costs one small file read rather than a second interpreter
@@ -99,16 +101,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _release_root():
-    junction = os.path.join(HERE, "current")
-    if os.path.isdir(junction):
-        return junction
     try:
         with open(os.path.join(HERE, "current.txt"), "r") as f:
             recorded = f.read().strip()
     except Exception:
-        return None
+        recorded = ""
     if recorded and os.path.isdir(recorded):
         return recorded
+    junction = os.path.join(HERE, "current")
+    if os.path.isdir(junction):
+        return junction
     return None
 
 
@@ -187,16 +189,17 @@ def current_path(env=None):
 
 
 def resolve_current(env=None):
-    """The live release directory, or None. Same order the launcher uses."""
-    junction = current_path(env)
-    if os.path.isdir(junction):
-        return junction
+    """The live release directory, or None. Same order the launcher uses:
+    `current.txt` first, since that is what a rollback edits."""
     try:
         with open(pointer_path(env), "r") as f:
             recorded = f.read().strip()
     except Exception:
-        return None
-    return recorded if recorded and os.path.isdir(recorded) else None
+        recorded = ""
+    if recorded and os.path.isdir(recorded):
+        return recorded
+    junction = current_path(env)
+    return junction if os.path.isdir(junction) else None
 
 
 # --- the Python interpreter to put in the hook command ------------------------
@@ -384,6 +387,10 @@ def copy_release(source, dest):
     def ignore(_dir, names):
         return [n for n in names if n in EXCLUDE_NAMES]
     shutil.copytree(source, dest, ignore=ignore)
+    # copytree copies the SOURCE directory's mtime onto dest, so every release
+    # carried the checkout's mtime and prune_releases could not tell new from
+    # old. Stamp it now.
+    os.utime(dest, None)
     return dest
 
 
@@ -429,7 +436,9 @@ def prune_releases(releases_dir, keep=KEEP_RELEASES, current=None):
     except Exception:
         return []
     entries = [e for e in entries if os.path.isdir(e)]
-    entries.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    # The name (a stamp() timestamp) breaks ties: releases copied before
+    # copy_release reset the mtime all share the checkout's.
+    entries.sort(key=lambda p: (os.path.getmtime(p), os.path.basename(p)), reverse=True)
     pruned = []
     current_real = os.path.normcase(os.path.abspath(current)) if current else None
     for old in entries[keep:]:

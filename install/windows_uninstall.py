@@ -21,7 +21,9 @@ holds the mode file, any per-rule overrides and -- most importantly -- the key
 file, and %LOCALAPPDATA%\\airlock\\state holds the shadow log, which is the
 record of what the guard would have done and the only reason to have run it
 in shadow at all. `--purge` removes those too, and says what it removed. The
-key file is never opened, never read and never printed by any path here.
+kit-level key file (%APPDATA%\\jev-kit\\env, the default) is shared by every
+jev-kit component and is kept even by --purge, which says so. The key file is
+never opened, never read and never printed by any path here.
 """
 import argparse
 import json
@@ -122,7 +124,7 @@ def clean_settings(path, launcher, apply=True):
     if not os.path.isfile(path):
         return None
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except Exception as exc:
         return "not valid JSON (%s), refusing to touch it" % str(exc)[:120]
@@ -133,7 +135,7 @@ def clean_settings(path, launcher, apply=True):
         return "would remove %d hook entry(ies): %s" % (len(removed), ", ".join(
             str(c)[:80] for c in removed))
     saved = wc.backup(path)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, indent=2) + "\n")
     return "removed %d hook entry(ies); backed up to %s" % (len(removed), saved)
 
@@ -194,13 +196,20 @@ def main(argv=None):
     state = str(paths.state_dir())
     if args.purge:
         for path, what in ((state, "state (the shadow log)"),
-                           (config, "config (INCLUDING THE KEY FILE)")):
+                           (config, "config (mode, rule overrides, and any key file kept there)")):
             if os.path.isdir(path):
                 if apply:
                     shutil.rmtree(path, ignore_errors=True)
                     actions.append("purged %s: %s" % (what, path))
                 else:
                     actions.append("would purge %s: %s" % (what, path))
+        # The kit-level key file (the default one) is shared by every jev-kit
+        # component, so uninstalling the guard leaves it. Say so: the purge
+        # line used to claim it had gone.
+        kit_key = os.path.join(str(paths.kit_config_dir()), "env")
+        if os.path.isfile(kit_key):
+            actions.append("kept the kit key file %s: every jev-kit component reads "
+                           "it. Delete it by hand if nothing else uses it." % kit_key)
     else:
         actions.append("kept config %s (mode, rule overrides, key file)" % config)
         actions.append("kept state %s (the shadow log). Pass --purge to remove both."

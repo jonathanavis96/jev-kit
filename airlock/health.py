@@ -136,7 +136,7 @@ def check_mode():
 def _load_log_rows():
     rows = []
     try:
-        with open(LOG_FILE, "r") as f:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -317,12 +317,29 @@ def run_health_check(windows=None):
         "tune_state": tune_state,
         "wall_s": round(time.monotonic() - start_wall, 3),
     }
+    result.update(awake_clock())
     if direct is not None:
         result["direct_ask"] = direct
     return status, result
 
 
 _EXIT_CODES = {"healthy": 0, "degraded": 1, "down": 2}
+
+
+def awake_clock(boot_id_path="/proc/sys/kernel/random/boot_id"):
+    """This boot's id and the monotonic clock, which stops while the machine
+    is suspended (Linux CLOCK_MONOTONIC). The session check uses them to tell
+    a timer that stopped from a laptop that just woke: a row's wall-clock age
+    includes the hours it slept. Empty where there is no boot id (Windows,
+    macOS), and the session check then falls back to the wall clock."""
+    try:
+        with open(boot_id_path, "r") as f:
+            boot_id = f.read().strip()
+    except Exception:
+        return {}
+    if not boot_id:
+        return {}
+    return {"boot_id": boot_id, "mono_s": round(time.monotonic(), 1)}
 
 
 def main():

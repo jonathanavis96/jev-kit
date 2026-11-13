@@ -99,9 +99,26 @@ class TestLocalRulesComeSecond(unittest.TestCase):
         r = self._label("sshd[9]: Authentication failed for root from 10.0.0.9")
         self.assertEqual((r["label"], r["decided_by"]), ("investigate", "local_rule"))
 
+    def test_a_server_error_is_settled_locally_in_any_case(self):
+        for line in ("upstream returned 503 Service Unavailable",
+                     "HTTP/1.1 500 Internal Server Error", "502 bad gateway"):
+            r = self._label(line)
+            self.assertEqual((r["label"], r["decided_by"]), ("attention", "local_rule"), line)
+
     def test_a_health_check_is_settled_locally(self):
         r = self._label("healthcheck /healthz -> 200 ok")
         self.assertEqual((r["label"], r["decided_by"]), ("routine", "local_rule"))
+
+    def test_a_failing_health_check_is_not_routine(self):
+        for line in ("health check failed: expected 200, got 503",
+                     "healthcheck: status down (was up)",
+                     "liveness probe failed: timeout, last ok 5m ago"):
+            self.assertNotEqual(self._label(line)["label"], "routine", line)
+
+    def test_a_line_with_undecodable_bytes_does_not_raise(self):
+        ask = RecordingAsk(label="attention")
+        record = lt.Triager(ask=ask).triage("bad byte \udcff here")
+        self.assertEqual(record["label"], "attention")
 
     def test_an_ordinary_get_is_settled_locally(self):
         r = self._label('10.0.0.1 - - [19/Sep/2026] "GET /api/orders HTTP/1.1" 200 1843')

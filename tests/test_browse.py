@@ -204,6 +204,10 @@ class TestArguments(unittest.TestCase):
         self.assertIs(p["screenshot"], False)
         p = server.parse_arguments({"goal": "see (https://example.com)."})
         self.assertEqual(p["start_url"], "https://example.com")
+        p = server.parse_arguments({"goal": "read https://en.wikipedia.org/wiki/Mercury_(planet)."})
+        self.assertEqual(p["start_url"], "https://en.wikipedia.org/wiki/Mercury_(planet)")
+        p = server.parse_arguments({"goal": "(see https://en.wikipedia.org/wiki/A_(b))"})
+        self.assertEqual(p["start_url"], "https://en.wikipedia.org/wiki/A_(b)")
 
     def test_an_explicit_start_url_wins(self):
         p = server.parse_arguments({"goal": "open https://a.example", "extract": " h1 ",
@@ -248,6 +252,8 @@ class TestArguments(unittest.TestCase):
         self.assertLessEqual(len(text.encode("utf-8")), 8192)
         self.assertEqual(text, "é" * 4096)
         self.assertEqual(server.trim_text("short"), ("short", False))
+        self.assertEqual(server.trim_text("a\ud800b"), ("a\ud800b", False))
+        self.assertEqual(server.trim_text("\ud800" * 10, limit=4), ("????", True))
         self.assertEqual(server.trim_text(None), ("", False))
 
 
@@ -828,6 +834,20 @@ class TestTheWorkerLifecycle(CallCase):
         self.assertEqual(self.started[0].stopped, 1)
         self.assertEqual(len(self.started), 1, "stopping is not worth a new worker")
         self.browse.chromium.close.assert_called_once_with()
+
+    def test_a_second_signal_does_not_abort_shutdown(self):
+        stop = server._make_stop()
+        with self.assertRaises(KeyboardInterrupt):
+            stop(15, None)
+        self.assertIsNone(stop(15, None))  # arrives during serve()'s finally
+
+    def test_shutdown_after_an_interrupted_call_uses_a_fresh_worker(self):
+        call(self.srv, goal="open https://example.com")
+        self.started[0].busy = True  # SIGTERM arrived while it was working
+        self.browse.shutdown()
+        self.assertEqual(self.started[0].stopped, 1)
+        self.assertNotIn({"op": "stop_daemon"}, self.started[0].asked)
+        self.assertEqual(self.started[1].asked, [{"op": "stop_daemon"}])
 
     def test_the_text_model_defaults_to_the_warm_claude_child(self):
         with mock.patch.dict(os.environ), \

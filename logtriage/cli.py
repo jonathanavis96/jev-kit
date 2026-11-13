@@ -62,6 +62,11 @@ def main(argv=None):
         cache=not args.no_cache,
     )
 
+    try:
+        # A log line with bytes that are not UTF-8 must not end the stream.
+        sys.stdin.reconfigure(errors="replace")
+    except Exception:
+        pass
     for raw in sys.stdin:
         line = raw.rstrip("\n")
         if not line.strip():

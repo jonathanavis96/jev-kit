@@ -49,10 +49,15 @@ DEFAULT_RULES = [
      r"(?i)\b(authentication failed|permission denied|unauthori[sz]ed|forbidden|"
      r"invalid credentials|access denied)"),
     ("attention", "a server-side HTTP failure",
-     r"(?<![0-9])5[0-9]{2}(?![0-9])\s+(internal server error|bad gateway|"
+     r"(?i)(?<![0-9])5[0-9]{2}(?![0-9])\s+(internal server error|bad gateway|"
      r"service unavailable|gateway time-?out)"),
+    # A failing check also mentions "up", "200" or "ok" ("expected 200, got
+    # 503", "was up, now down"), so any failure word keeps the line off this
+    # rule and lets the model, or a rule above, read it.
     ("routine", "a successful health or readiness check",
-     r"(?i)\b(health ?check|readiness|liveness|/healthz|/readyz|/ping)\b.*\b"
+     r"(?i)^(?!.*\b(fail(s|ed|ing|ure)?|error|unhealthy|down|timed? ?out|refused|"
+     r"not ok|unavailable|5[0-9]{2})\b)"
+     r".*\b(health ?check|readiness|liveness|/healthz|/readyz|/ping)\b.*\b"
      r"(ok|healthy|200|pass(ed)?|up)\b"),
     ("routine", "an ordinary successful request",
      r'(?i)"\s*(GET|HEAD|OPTIONS)\s[^"]*"\s+(200|204|301|302|304)\b'),
@@ -225,7 +230,11 @@ class Triager:
         if not self.use_model or self.ask is None:
             return None, "no model configured", None
 
-        key = hashlib.sha256(text.encode("utf-8")).hexdigest() if self._cache is not None else None
+        # surrogatepass: a line read with surrogateescape (undecodable bytes)
+        # holds lone surrogates, and a strict encode here raised outside any
+        # try and ended the whole stream.
+        key = (hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+               if self._cache is not None else None)
         if key is not None and key in self._cache:
             self.stats["cached"] += 1
             label, confidence = self._cache[key]

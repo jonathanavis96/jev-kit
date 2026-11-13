@@ -179,6 +179,44 @@ class TestStalenessAndTheUptimeGuard(unittest.TestCase):
                   release_ok=None)))
 
 
+class TestResumeFromSuspend(unittest.TestCase):
+    """A row hours old by the wall clock but written minutes ago in AWAKE time
+    is a laptop that just woke, not a stopped timer."""
+
+    ROW = {"status": "healthy", "ts": "2026-09-19T00:00:00+00:00",
+           "boot_id": "b-1", "mono_s": 1000.0}
+
+    def test_awake_age_on_the_same_boot(self):
+        self.assertEqual(sc.awake_age_seconds(self.ROW, boot_id="b-1", mono=1300.0), 300.0)
+
+    def test_awake_age_is_unknown_on_another_boot_or_an_old_row(self):
+        self.assertIsNone(sc.awake_age_seconds(self.ROW, boot_id="b-2", mono=1300.0))
+        self.assertIsNone(sc.awake_age_seconds({"status": "healthy"}, boot_id="b-1", mono=1.0))
+        self.assertIsNone(sc.awake_age_seconds(self.ROW, boot_id_path="/nonexistent/boot_id"))
+
+    def test_just_resumed_is_silent(self):
+        self.assertIsNone(sc.choose_warning(
+            facts(health_row=self.ROW, health_age_s=8 * 3600.0,
+                  health_awake_age_s=120.0, uptime_s=86400.0, health_timer=True)))
+
+    def test_stale_in_awake_time_still_warns(self):
+        w = sc.choose_warning(facts(health_row=self.ROW, health_age_s=8 * 3600.0,
+                                    health_awake_age_s=3000.0, uptime_s=86400.0,
+                                    health_timer=True))
+        self.assertIn("health timer", w.headline)
+
+    def test_the_health_row_carries_the_awake_clock(self):
+        from airlock import health
+        tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".boot")
+        tmp.write("abc-123\n")
+        tmp.close()
+        self.addCleanup(os.unlink, tmp.name)
+        clock = health.awake_clock(boot_id_path=tmp.name)
+        self.assertEqual(clock["boot_id"], "abc-123")
+        self.assertIsInstance(clock["mono_s"], float)
+        self.assertEqual(health.awake_clock(boot_id_path="/nonexistent/boot_id"), {})
+
+
 class TestUptimeInjection(unittest.TestCase):
     def test_linux_reads_proc_uptime(self):
         tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".uptime")

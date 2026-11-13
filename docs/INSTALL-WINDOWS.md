@@ -254,7 +254,8 @@ There are three moving parts instead:
 
 3. **`airlock-hook.py`**, a small stable launcher in the install root.
    `settings.json` points **here**, never at a release directory. It resolves
-   `current` (junction first, then `current.txt`) and runs the real hook **in
+   the release (`current.txt` first, since that is what a rollback edits,
+   then the junction) and runs the real hook **in
    the same process**, so the indirection costs one small file read rather
    than a second interpreter start-up.
 
@@ -328,9 +329,11 @@ py -3 install\windows_uninstall.py --purge
 It removes **only airlock's own** `PreToolUse` entry, backing each
 `settings.json` up first, then the scheduled task, the launcher, the pointer,
 the junction and the releases. **Config and state survive by default.** The
-config directory holds your key file, and the state directory holds the shadow
-log, which is the whole record of what the guard would have done. `--purge`
-removes those too and says what it removed.
+config directory holds the mode and rule overrides, and the state directory
+holds the shadow log, which is the whole record of what the guard would have
+done. `--purge` removes those too and says what it removed. The kit key file
+(`%APPDATA%\jev-kit\env` by default) is shared by every jev-kit component, so
+even `--purge` keeps it and says so; delete it by hand if nothing else uses it.
 
 ---
 

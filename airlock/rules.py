@@ -344,6 +344,12 @@ def split_segments_ops(command):
             newline = command.find("\n", i)
             i = n if newline == -1 else newline
             continue
+        if ch == "\\" and command[i + 1:i + 2] == "\n" and quote != "'":
+            # A line continuation: bash removes the pair, outside quotes and
+            # inside double quotes alike. Kept, it left a lone `\` as the
+            # program of `a &&\<newline>sudo rm -rf /etc` and hid the command.
+            i += 2
+            continue
         if quote:
             buf.append(ch)
             if ch == "\\" and quote == '"' and i + 1 < n:
@@ -991,6 +997,18 @@ def _secret_path_in(tokens):
     return None
 
 
+def _spaced_quoted_words(seg):
+    """Quoted words holding whitespace, unquoted. `words()` splits on spaces
+    inside quotes too, so `cat "/home/u/My Project/.env"` reached the path
+    patterns as `"/home/u/My` and `Project/.env"`, and neither matched."""
+    out = []
+    for m in _QUOTED_RE.finditer(seg or ""):
+        body = m.group(0)[1:-1]
+        if any(c.isspace() for c in body):
+            out.append(body)
+    return out
+
+
 def _key_file_paths():
     """Every path the key can live at on this machine. Never raises."""
     found = []
@@ -1310,7 +1328,8 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in READERS or _windows_reader(prog):
             if prog in ("grep", "egrep", "rg", "ag") and _quiet_grep(args):
                 continue
-            hit = _secret_path_in(args) or _key_file_from(args, cwd)
+            hit = (_secret_path_in(args) or _secret_path_in(_spaced_quoted_words(seg))
+                   or _key_file_from(args, cwd))
             if hit:
                 return Match(
                     "`%s` on a secret store (%s) would print its contents" % (prog, hit),
@@ -1351,8 +1370,9 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in ("env", "set", "export", "declare") and not args:
             if prog == "env" and seg_idx < top_level and _names_only_pipe(pairs, seg_idx):
                 continue
-            if prog in ("env", "set"):
-                return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
+            # Bare `export` prints every exported variable with its value, as
+            # `export -p` does, and bare `declare` every variable.
+            return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
         if prog == "export" and args == ["-p"]:
             return Match("`export -p` dumps every exported variable, secrets included", R1_SUGGESTION)
         if prog == "declare" and args and args[0] in ("-x", "-p"):
@@ -1574,6 +1594,18 @@ def prefilter_wide_run(ctx, cpus=None):
                 "    pytest tests/test_<thing>.py -x -q%s" % ("" if capped else "\nand cap parallelism: -n2"),
             )
 
+        # `npx jest` / `npx -y vitest` run the runner itself. Without this the
+        # outer test below needed args[0] to be `test` or `run`, so the npx
+        # branch inside it never matched a runner.
+        shown = prog
+        if prog == "npx":
+            rest = list(args)
+            while rest and rest[0] in ("-y", "--yes", "--no-install", "-q", "--quiet"):
+                rest = rest[1:]
+            if rest and rest[0] in _JS_RUNNERS:
+                prog, args = rest[0], rest[1:]
+                shown = "npx " + prog
+
         if prog in _JS_RUNNERS or (prog in ("npm", "pnpm", "yarn", "npx") and args[:1] in (["test"], ["run"])):
             joined = " ".join(args)
             if prog in ("npm", "pnpm", "yarn") and args[:1] == ["run"] and args[1:2] != ["test"]:
@@ -1588,10 +1620,10 @@ def prefilter_wide_run(ctx, cpus=None):
             if n is None:
                 return None
             return Match(
-                "`%s %s` runs the whole test suite with uncapped workers (%d shared cores)"
-                % (prog, joined.strip(), n),
+                "`%s` runs the whole test suite with uncapped workers (%d shared cores)"
+                % (" ".join([shown] + args).strip(), n),
                 "Name the test file, and cap workers:\n"
-                "    %s %s -- <path/to/test> --maxWorkers=2" % (prog, (args[0] if args else "test")),
+                "    %s %s -- <path/to/test> --maxWorkers=2" % (shown, (args[0] if args else "test")),
             )
 
         if prog == "make":
@@ -1897,9 +1929,14 @@ _DD_HARMLESS = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/
 # A download piped straight into a shell with no script argument, so the
 # shell runs whatever came down the wire. `curl page | bash norm.sh` hands the
 # page to a local script as stdin and is not this.
+#
+# A redirection such as `2>&1` is not a separator, `|&` pipes stderr too, and
+# a shell given `-s` reads its script from stdin whatever follows, so
+# `curl https://get.rvm.io | bash -s stable` is this as well.
 _PIPE_TO_SHELL_RE = re.compile(
-    r"\b(curl|wget)\b[^|;&\n]*\|\s*(?:(?:\S*/)?sudo\s+(?:-[A-Za-z]*[ugpCUrtDRTh]\s+\S+\s+|--(?:user|group)\s+\S+\s+|-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
-    r"(?:\s+-[^\s-]\S*)*\s*(?:--?(?:\s|$)|$|[;&|\n)])"
+    r"\b(curl|wget)\b(?:[<>]&|[^|;&\n])*\|&?\s*(?:(?:\S*/)?sudo\s+(?:-[A-Za-z]*[ugpCUrtDRTh]\s+\S+\s+|--(?:user|group)\s+\S+\s+|-\S+\s+)*)?(?:(?:\S*/)?env\s+)?(?:\S*/)?(?:ba|z|da|k)?sh\b"
+    r"(?:(?:\s+-[^\s-]\S*)*\s*(?:--?(?:\s|$)|$|[;&|\n)])"
+    r"|(?:\s+-[^\s-]\S*)*\s+-[A-Za-z]*s[A-Za-z]*(?:\s|$))"
 )
 # Quoted text is data (a commit message, an echo), never a pipeline. Blanked
 # before the pipe-to-shell search so `git commit -m 'avoid curl x | bash; ...'`

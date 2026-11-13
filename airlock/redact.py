@@ -26,12 +26,13 @@ _KEY_VALUE_PATTERNS = [
     re.compile(r"(?i)(?P<key>(?:--)?password)(?P<kq>[\"']?)"
                r"(?P<sep>[ \t]*[:=][ \t]*|[ \t]+)" + _VALUE),
     # <ANYTHING>SECRET|TOKEN|PASSWORD|API_KEY<ANYTHING>=<value>, also with a
-    # colon (YAML, HTTP headers, JSON keys)
+    # colon (YAML, HTTP headers, JSON keys), and with spaces around the `=`
+    # (`API_KEY = abc`, Python and TOML).
     # (the lookbehind starts a match only at a word's first character; without
     # it a long word is rescanned from every position, quadratic)
     re.compile(r"(?i)(?P<key>(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]*"
                r"(?:SECRET|TOKEN|PASSWORD|API_KEY)[A-Za-z0-9_\-]*)(?P<kq>[\"']?)"
-               r"(?P<sep>=|[ \t]*:[ \t]*)" + _VALUE),
+               r"(?P<sep>[ \t]*=[ \t]*|[ \t]*:[ \t]*)" + _VALUE),
 ]
 
 # Keys that name a counter or a measurement (max_tokens, inputTokens,

@@ -60,6 +60,15 @@ if [ ! -f "$HOOK" ]; then
 else
   TMPHOME="$(mktemp -d)"
   trap 'rm -rf "$TMPHOME"' EXIT
+  # The checks below run the hook against a throwaway HOME. A config or state
+  # directory exported by config.env (or the calling shell) would point the
+  # hook back at the real ones -- the real rules.json, mode and kill switch --
+  # so those variables are dropped for these runs.
+  ISOLATED=(env)
+  for var in AIRLOCK_CONFIG_DIR PLUMBLINE_CONFIG_DIR JEV_GUARD_CONFIG_DIR \
+             AIRLOCK_STATE_DIR PLUMBLINE_STATE_DIR JEV_GUARD_STATE_DIR; do
+    ISOLATED+=(-u "$var")
+  done
 
   # --- one deny -----------------------------------------------------------
   # R6: opening a browser on a headless box. Code-only, so this needs no API
@@ -73,7 +82,7 @@ else
   mkdir -p "$TMPHOME/.config/airlock"
   printf '%s\n' '{"R6-gui-or-browser": "deny"}' > "$TMPHOME/.config/airlock/rules.json"
   deny_out="$(printf '%s' '{"session_id":"doctor-deny","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"xdg-open https://example.com"}}' \
-    | HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null)"
+    | "${ISOLATED[@]}" HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null)"
   if printf '%s' "$deny_out" | "$PY" -c '
 import json,sys
 d = json.load(sys.stdin)["hookSpecificOutput"]
@@ -89,7 +98,7 @@ sys.exit(0 if d.get("permissionDecision") == "deny" else 1)
   # An ordinary command no rule covers must produce NOTHING at all: no JSON,
   # no log row, no subprocess. Empty stdout is the whole assertion.
   allow_out="$(printf '%s' '{"session_id":"doctor-allow","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"echo hello"}}' \
-    | HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null)"
+    | "${ISOLATED[@]}" HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null)"
   if [ -z "$allow_out" ]; then
     pass "allow: 'echo hello' passes through silently, no output"
   else
@@ -98,7 +107,7 @@ sys.exit(0 if d.get("permissionDecision") == "deny" else 1)
 
   # --- fail-open ----------------------------------------------------------
   broken_out="$(printf '%s' 'not json at all' \
-    | HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null; echo "rc=$?")"
+    | "${ISOLATED[@]}" HOME="$TMPHOME" AIRLOCK_MODE=enforce "$PY" "$HOOK" 2>/dev/null; echo "rc=$?")"
   if [ "$broken_out" = "rc=0" ]; then
     pass "fail-open: malformed payload exits 0 with no output"
   else
@@ -107,7 +116,7 @@ sys.exit(0 if d.get("permissionDecision") == "deny" else 1)
 
   # --- kill switch --------------------------------------------------------
   killed_out="$(printf '%s' '{"session_id":"doctor-kill","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"xdg-open https://example.com"}}' \
-    | HOME="$TMPHOME" AIRLOCK_MODE=enforce AIRLOCK_DISABLE=1 "$PY" "$HOOK" 2>/dev/null)"
+    | "${ISOLATED[@]}" HOME="$TMPHOME" AIRLOCK_MODE=enforce AIRLOCK_DISABLE=1 "$PY" "$HOOK" 2>/dev/null)"
   if [ -z "$killed_out" ]; then
     pass "kill switch: AIRLOCK_DISABLE=1 makes the hook a complete no-op"
   else

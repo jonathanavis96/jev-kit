@@ -94,6 +94,11 @@ def _prompt_text(row):
         # Text Claude Code injected in the user's slot: a skill body, hook
         # feedback, a local-command caveat. It came from a file or a hook.
         return None
+    if row.get("isCompactSummary"):
+        # The summary Claude Code writes after compacting: a plain-string
+        # `user` row without isMeta, but the model's words about the
+        # conversation, not the user's.
+        return None
     message = row.get("message")
     if not isinstance(message, dict):
         return None

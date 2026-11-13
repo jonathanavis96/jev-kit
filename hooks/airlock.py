@@ -123,7 +123,7 @@ def _spawn_shadow_worker(raw):
         # cannot express "owner only" (see airlock/platform_compat.py).
         fd, path = tempfile.mkstemp(prefix="airlock-", suffix=".json")
         platform_compat.restrict_path(path, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(raw)
         # start_new_session=True on POSIX, DETACHED_PROCESS |
         # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW on Windows. Either way
@@ -144,9 +144,24 @@ def _spawn_shadow_worker(raw):
                 pass
 
 
+def _read_stdin():
+    """Read the hook payload as UTF-8, which is what Claude Code sends.
+
+    Python decodes a piped stdin with the locale code page on native Windows
+    (cp1252 and the like). A UTF-8 payload holding one character whose bytes
+    that code page leaves undefined then raises, and the hook used to return
+    without judging the call at all. Undecodable bytes become U+FFFD instead.
+    """
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    return sys.stdin.read()
+
+
 def main():
     try:
-        raw = sys.stdin.read()
+        raw = _read_stdin()
     except Exception:
         return
 

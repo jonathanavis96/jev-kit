@@ -41,7 +41,7 @@ HIGH_PRECISION = [
     ("npm_token", re.compile(LEFT + r"npm_[A-Za-z0-9]{36}")),
     ("private_key", re.compile(r"-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")),
     ("jwt", re.compile(LEFT + r"eyJ[\w-]{10,}\.eyJ")),
-    ("url_credentials", re.compile(LEFT + r"\w[\w+.-]*://[^/\s:@]+:[^/\s:@]+@")),
+    ("url_credentials", re.compile(LEFT + r"\w[\w+.-]*://[^/\s:@]+:(?P<value>[^/\s:@]+)@")),
     # This organisation's own key shape, which jev-commit had no reason to know
     # about. It is the one that has already had to be rotated once.
     ("typesafe_key", re.compile(LEFT + r"apikey_[A-Za-z0-9_]{16,}")),
@@ -147,7 +147,11 @@ def scan_text(text, include_recall=False):
         matched = False
         for kind, pattern in HIGH_PRECISION:
             match = pattern.search(line)
-            if match and not is_placeholder(match.group(0)) and not says_placeholder(line):
+            # A pattern with a `value` group names the secret part: for a URL
+            # that is the password, so `user:$TOKEN@` and `user:<password>@`
+            # read as the placeholders they are, not the whole URL.
+            secret = (match.groupdict().get("value") or match.group(0)) if match else ""
+            if match and not is_placeholder(secret) and not says_placeholder(line):
                 hits.append({
                     "kind": kind,
                     "precision": "high",

@@ -92,8 +92,14 @@ class TestTheNegativeCases(unittest.TestCase):
             "KEY=<your-api-key-here>",
             "KEY=${ANTHROPIC_API_KEY}",
             "KEY=$TYPESAFE_API_KEY",
+            "git clone https://user:$TOKEN@github.com/x",
+            "git clone https://user:${GH_TOKEN}@github.com/x",
+            "git clone https://user:<password>@github.com/x",
         ):
             self.assertIsNone(belt.first_blocking_hit(line), line)
+
+    def test_a_real_password_in_a_url_still_fires(self):
+        self.assertIsNotNone(belt.first_blocking_hit("https://u:" + "hunter2real" + "@h.com/x"))
 
     def test_a_placeholder_word_anywhere_on_the_line_suppresses_it(self):
         line = "# the example token from the docs: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0"

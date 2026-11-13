@@ -13,8 +13,15 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Key-file resolution: the ONE shell implementation, shared with every other
 # component here. The order and the pointer-file trust rules are documented in
 # airlock/keyfile.py's module docstring. Fails open if the helper is missing.
-if [ -r "$here/../install/keyfile.sh" ]; then
-  . "$here/../install/keyfile.sh"
+# The installed wrapper lives in ~/bin, where ../install does not exist, so
+# the deployed guard release's copy is tried next. Without it the fallback
+# below ignored the pointer file and resolved a different key file.
+keyfile_sh="$here/../install/keyfile.sh"
+[ -r "$keyfile_sh" ] || \
+  keyfile_sh="${AIRLOCK_HOME:-${JEV_HOME:-$HOME/.local/share/airlock}}/current/install/keyfile.sh"
+if [ -r "$keyfile_sh" ]; then
+  # shellcheck disable=SC1090
+  . "$keyfile_sh"
 else
   airlock_key_file() {
     local f="${AIRLOCK_KEY_FILE:-${JEVKIT_KEY_FILE:-}}"
@@ -26,10 +33,17 @@ else
 fi
 envfile="$(airlock_key_file)"
 if [ -z "${TYPESAFE_API_KEY:-}" ] && [ -r "$envfile" ]; then
-  TYPESAFE_API_KEY="$(sed -n 's/^ *\(export \)\?TYPESAFE_API_KEY=//p' "$envfile" | head -1)"
+  # Surrounding whitespace and one pair of matching quotes are dropped, as
+  # airlock/keyfile.py does: KEY="abc" is the key abc, not "abc".
+  TYPESAFE_API_KEY="$(sed -n 's/^ *\(export \)\?TYPESAFE_API_KEY=//p' "$envfile" | head -1 \
+    | sed "s/^[[:space:]]*//; s/[[:space:]]*\$//; s/^\"\(.*\)\"\$/\1/; s/^'\(.*\)'\$/\1/")"
 fi
 [ -n "${TYPESAFE_API_KEY:-}" ] || exit 0
 export TYPESAFE_API_KEY JEV_BELAY_LOG=1
-belay_home="${AIRLOCK_BELAY_DIR:-$HOME/.local/share/jev-belay}"
+# belay/install.sh rewrites the next line to the home it installed into, so a
+# --home (or an AIRLOCK_BELAY_DIR set only at install time) still resolves when
+# the hook runs without that variable.
+belay_default_home="$HOME/.local/share/jev-belay"
+belay_home="${AIRLOCK_BELAY_DIR:-$belay_default_home}"
 [ -e "$belay_home/current/belay.mjs" ] || belay_home="$here"
 exec node "$belay_home/current/belay.mjs"
