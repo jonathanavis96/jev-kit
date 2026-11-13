@@ -401,17 +401,32 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.rstrip("/") != "/v1/chat/completions":
             self._send_json(404, {"error": {"message": f"no such route {self.path}"}})
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"error": {"message": "invalid Content-Length"}})
+            return
+        raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
             req = json.loads(raw)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             self._send_json(400, {"error": {"message": f"invalid JSON body: {exc}"}})
+            return
+        # A body of the wrong shape raised AttributeError out of this handler
+        # and the client got a dropped connection instead of a 400.
+        if not isinstance(req, dict):
+            self._send_json(400, {"error": {"message": "the JSON body must be an object"}})
             return
 
         model_field = req.get("model", "")
         messages = req.get("messages") or []
         response_format = req.get("response_format")
+        if not isinstance(model_field, str) or not isinstance(messages, list) \
+                or not all(isinstance(m, dict) for m in messages) \
+                or not (response_format is None or isinstance(response_format, dict)):
+            self._send_json(400, {"error": {"message":
+                "expected model: string, messages: list of objects, response_format: object"}})
+            return
         if req.get("stream"):
             self._send_json(400, {"error": {"message": "streaming not implemented by this shim"}})
             return
@@ -421,10 +436,17 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json(400, {"error": {"message": str(exc)}})
             return
-        except (TimeoutError, RuntimeError) as exc:
+        except (TimeoutError, RuntimeError, OSError) as exc:
+            # OSError: the child could not be spawned (no `claude` on PATH).
             with _STATS_LOCK:
                 _STATS["errors"] += 1
             self._send_json(502, {"error": {"message": f"claude CLI backend failed: {exc}"}})
+            return
+        except Exception as exc:
+            with _STATS_LOCK:
+                _STATS["errors"] += 1
+            logger.exception("unexpected failure handling a completion")
+            self._send_json(500, {"error": {"message": f"shim failed: {type(exc).__name__}"}})
             return
 
         usage = result["usage"] or {}
