@@ -8,6 +8,7 @@ Windows (the `mklink /J` junction, `schtasks`) is allowed to fail and is
 asserted to fail SOFTLY -- that is the actual requirement: the text pointer
 has to carry the install when the junction cannot be made.
 """
+import io
 import json
 import os
 import shutil
@@ -406,6 +407,19 @@ class TestUninstall(unittest.TestCase):
         self._uninstall("--purge")
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "cfg")))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "state")))
+
+    def test_purge_says_it_kept_the_shared_kit_key_file(self):
+        kit = os.path.join(self.tmp, "kit")
+        os.makedirs(kit)
+        with open(os.path.join(kit, "env"), "w") as f:
+            f.write("TYPESAFE_API_KEY=x\n")
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, dict(self.env, JEVKIT_CONFIG_DIR=kit), clear=False), \
+             mock.patch("sys.stdout", out):
+            windows_uninstall.main(["--purge"])
+        self.assertTrue(os.path.isfile(os.path.join(kit, "env")))
+        self.assertNotIn("INCLUDING THE KEY FILE", out.getvalue())
+        self.assertIn("kept the kit key file", out.getvalue())
 
     def test_only_airlocks_own_hook_is_removed(self):
         with open(self.settings) as f:
