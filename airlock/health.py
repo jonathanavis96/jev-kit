@@ -136,7 +136,7 @@ def check_mode():
 def _load_log_rows():
     rows = []
     try:
-        with open(LOG_FILE, "r") as f:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:

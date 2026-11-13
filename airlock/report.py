@@ -19,7 +19,7 @@ TUNE_LOG_FILE = Path(paths.env("AIRLOCK_TUNE_STATE_DIR", "PLUMBLINE_TUNE_STATE_D
 def _load_rows():
     rows = []
     try:
-        with open(LOG_FILE, "r") as f:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -48,7 +48,7 @@ def _percentile(values, pct):
 def _load_tune_rows():
     rows = []
     try:
-        with open(TUNE_LOG_FILE, "r") as f:
+        with open(TUNE_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
