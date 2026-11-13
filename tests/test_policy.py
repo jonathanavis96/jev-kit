@@ -154,6 +154,11 @@ class TestBashPrefilter(unittest.TestCase):
     def test_piped_grep_triggers(self):
         self.assertTrue(policy.bash_is_search_like("npm test | grep pass"))
 
+    def test_a_search_on_a_later_line_triggers(self):
+        self.assertTrue(policy.bash_is_search_like("cd /srv\nfind / -name '*.xlsm'"))
+        self.assertTrue(policy.bash_is_search_like("cd /srv \\\n  && ls\ngrep -rn x /"))
+        self.assertFalse(policy.bash_is_search_like("cd /srv\ngit status"))
+
     def test_du_triggers(self):
         self.assertTrue(policy.bash_is_search_like("du -sh /var/log"))
 

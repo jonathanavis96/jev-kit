@@ -319,7 +319,9 @@ WINDOWS_SEARCH_PROGRAMS = {
     "select-string", "sls", "es",
     "cmd", "powershell", "pwsh",
 }
-_SEGMENT_SPLIT = re.compile(r"[;&|]+")
+# A newline separates commands too: without it the search on the second line
+# of "cd /x\nfind / -name y" sat in the first segment and was never judged.
+_SEGMENT_SPLIT = re.compile(r"[;&|\n]+")
 _SKIP_PREFIX_TOKENS = {"sudo", "nice", "time", "env"}
 
 
@@ -337,7 +339,8 @@ def bash_is_search_like(command, windows=None):
         return False
     if windows is None:
         windows = is_windows()
-    for segment in _SEGMENT_SPLIT.split(command):
+    # A backslash-newline is a line continuation, not a separator.
+    for segment in _SEGMENT_SPLIT.split(command.replace("\\\n", " ")):
         segment = segment.strip()
         if not segment:
             continue
