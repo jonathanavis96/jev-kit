@@ -1029,11 +1029,7 @@ def classify_command(command, cwd=None, windows=None, _depth=0):
     command = strip_shell_comment(command)
 
     try:
-        # On Windows the continuations are not joined (Git Bash `\`,
-        # PowerShell backtick, cmd `^`), so a newline split there would cut a
-        # continued command and lose its root: keep main's reading instead.
-        ops = _SEQUENTIAL_OPS if not windows else _SEQUENTIAL_OPS[:-1]
-        statements = _split_top_level(command, ops, windows)
+        statements = _split_top_level(command, _SEQUENTIAL_OPS, windows)
     except Exception:
         return {"scope": "unknown", "program": None, "roots": []}
 
