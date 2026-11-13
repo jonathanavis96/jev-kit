@@ -196,7 +196,10 @@ def describe_permissions(path, windows=None, platform=None):
     path = str(path)
     if is_windows(windows, platform):
         profile = os.environ.get("USERPROFILE") or ""
-        inside = bool(profile) and path.lower().startswith(profile.lower())
+        # A path test, not a string prefix: C:\Users\al is not the profile
+        # of C:\Users\alice\x.
+        from . import winpath
+        inside = bool(profile) and winpath.is_under(path, profile)
         if inside:
             return True, ("inside the per-user profile; access is governed by the "
                           "Windows ACL on that profile, not by a POSIX mode")
