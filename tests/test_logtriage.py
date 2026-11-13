@@ -99,6 +99,12 @@ class TestLocalRulesComeSecond(unittest.TestCase):
         r = self._label("sshd[9]: Authentication failed for root from 10.0.0.9")
         self.assertEqual((r["label"], r["decided_by"]), ("investigate", "local_rule"))
 
+    def test_a_server_error_is_settled_locally_in_any_case(self):
+        for line in ("upstream returned 503 Service Unavailable",
+                     "HTTP/1.1 500 Internal Server Error", "502 bad gateway"):
+            r = self._label(line)
+            self.assertEqual((r["label"], r["decided_by"]), ("attention", "local_rule"), line)
+
     def test_a_health_check_is_settled_locally(self):
         r = self._label("healthcheck /healthz -> 200 ok")
         self.assertEqual((r["label"], r["decided_by"]), ("routine", "local_rule"))

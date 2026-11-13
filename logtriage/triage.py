@@ -49,7 +49,7 @@ DEFAULT_RULES = [
      r"(?i)\b(authentication failed|permission denied|unauthori[sz]ed|forbidden|"
      r"invalid credentials|access denied)"),
     ("attention", "a server-side HTTP failure",
-     r"(?<![0-9])5[0-9]{2}(?![0-9])\s+(internal server error|bad gateway|"
+     r"(?i)(?<![0-9])5[0-9]{2}(?![0-9])\s+(internal server error|bad gateway|"
      r"service unavailable|gateway time-?out)"),
     # A failing check also mentions "up", "200" or "ok" ("expected 200, got
     # 503", "was up, now down"), so any failure word keeps the line off this
