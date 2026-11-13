@@ -96,13 +96,25 @@ def print_summary(results):
               % (len(review), ", ".join(str(r.get("page")) for r in review)))
 
 
+def _page_number(text):
+    """A 1-based page number. A negative --first indexed pages from the end
+    and then classified them again from the start, numbered 0 and below."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not a page number" % text) from None
+    if n < 1:
+        raise argparse.ArgumentTypeError("page numbers start at 1, not %d" % n)
+    return n
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=next(iter((__doc__ or "").splitlines()), ""))
     parser.add_argument("pdf", help="a text-layer PDF")
     parser.add_argument("--taxonomy", default=None,
                         help="taxonomy JSON (default: docclass/taxonomies/example.json)")
-    parser.add_argument("--first", type=int, default=None, help="first page, 1-based")
-    parser.add_argument("--last", type=int, default=None, help="last page, inclusive")
+    parser.add_argument("--first", type=_page_number, default=None, help="first page, 1-based")
+    parser.add_argument("--last", type=_page_number, default=None, help="last page, inclusive")
     parser.add_argument("--summary", action="store_true", help="a table instead of JSON lines")
     args = parser.parse_args(argv)
 
