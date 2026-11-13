@@ -1749,6 +1749,18 @@ def prefilter_wide_run(ctx, cpus=None):
                 "    pytest tests/test_<thing>.py -x -q%s" % ("" if capped else "\nand cap parallelism: -n2"),
             )
 
+        # `npx jest` / `npx -y vitest` run the runner itself. Without this the
+        # outer test below needed args[0] to be `test` or `run`, so the npx
+        # branch inside it never matched a runner.
+        shown = prog
+        if prog == "npx":
+            rest = list(args)
+            while rest and rest[0] in ("-y", "--yes", "--no-install", "-q", "--quiet"):
+                rest = rest[1:]
+            if rest and rest[0] in _JS_RUNNERS:
+                prog, args = rest[0], rest[1:]
+                shown = "npx " + prog
+
         if prog in _JS_RUNNERS or (prog in ("npm", "pnpm", "yarn", "npx") and args[:1] in (["test"], ["run"])):
             joined = " ".join(args)
             if prog in ("npm", "pnpm", "yarn") and args[:1] == ["run"] and args[1:2] != ["test"]:
@@ -1763,10 +1775,10 @@ def prefilter_wide_run(ctx, cpus=None):
             if n is None:
                 return None
             return Match(
-                "`%s %s` runs the whole test suite with uncapped workers (%d shared cores)"
-                % (prog, joined.strip(), n),
+                "`%s` runs the whole test suite with uncapped workers (%d shared cores)"
+                % (" ".join([shown] + args).strip(), n),
                 "Name the test file, and cap workers:\n"
-                "    %s %s -- <path/to/test> --maxWorkers=2" % (prog, (args[0] if args else "test")),
+                "    %s %s -- <path/to/test> --maxWorkers=2" % (shown, (args[0] if args else "test")),
             )
 
         if prog == "make":

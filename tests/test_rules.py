@@ -227,6 +227,15 @@ class TestR3HostCapacity(unittest.TestCase):
         match = rules.prefilter_wide_run(ctx_bash("npm test"), cpus=4)
         self.assertIn("4 shared cores", match.detail)
 
+    def test_npx_runs_the_runner_itself(self):
+        for c in ("npx jest", "npx -y vitest run"):
+            match = rules.prefilter_wide_run(ctx_bash(c), cpus=4)
+            self.assertIsNotNone(match, c)
+            self.assertIn("`%s`" % c.replace(" -y", ""), match.detail)
+        for c in ("npx jest tests/a.test.js", "npx vitest --maxWorkers=2",
+                  "npx playwright test"):
+            self.assertIsNone(rules.prefilter_wide_run(ctx_bash(c), cpus=4), c)
+
     def test_ctx_cpus_pins_the_count_for_a_caller_holding_only_a_ctx(self):
         # The eval harness pins capacity this way, so a case's label does not
         # depend on the machine scoring it (Codex, PR #2).
