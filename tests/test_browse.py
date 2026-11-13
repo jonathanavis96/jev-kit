@@ -204,6 +204,10 @@ class TestArguments(unittest.TestCase):
         self.assertIs(p["screenshot"], False)
         p = server.parse_arguments({"goal": "see (https://example.com)."})
         self.assertEqual(p["start_url"], "https://example.com")
+        p = server.parse_arguments({"goal": "read https://en.wikipedia.org/wiki/Mercury_(planet)."})
+        self.assertEqual(p["start_url"], "https://en.wikipedia.org/wiki/Mercury_(planet)")
+        p = server.parse_arguments({"goal": "(see https://en.wikipedia.org/wiki/A_(b))"})
+        self.assertEqual(p["start_url"], "https://en.wikipedia.org/wiki/A_(b)")
 
     def test_an_explicit_start_url_wins(self):
         p = server.parse_arguments({"goal": "open https://a.example", "extract": " h1 ",
@@ -830,6 +834,12 @@ class TestTheWorkerLifecycle(CallCase):
         self.assertEqual(self.started[0].stopped, 1)
         self.assertEqual(len(self.started), 1, "stopping is not worth a new worker")
         self.browse.chromium.close.assert_called_once_with()
+
+    def test_a_second_signal_does_not_abort_shutdown(self):
+        stop = server._make_stop()
+        with self.assertRaises(KeyboardInterrupt):
+            stop(15, None)
+        self.assertIsNone(stop(15, None))  # arrives during serve()'s finally
 
     def test_shutdown_after_an_interrupted_call_uses_a_fresh_worker(self):
         call(self.srv, goal="open https://example.com")

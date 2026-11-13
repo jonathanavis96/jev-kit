@@ -776,6 +776,20 @@ class Chromium:
 _URL_IN_GOAL = re.compile(r"https?://[^\s<>\"'`]+")
 
 
+def _trim_url(url):
+    """Drop sentence punctuation after a URL found in prose. A closing bracket
+    goes only when it has no opener inside the URL, so a Wikipedia page such as
+    .../Foo_(bar) keeps its ')' while "(see https://x.example)." loses it."""
+    pairs = {")": "(", "]": "[", "}": "{"}
+    while url:
+        last = url[-1]
+        if last in ".,;:!?" or (last in pairs and url.count(last) > url.count(pairs[last])):
+            url = url[:-1]
+        else:
+            break
+    return url
+
+
 def parse_arguments(args):
     if not isinstance(args, dict):
         raise BrowseError("arguments must be an object with a `goal`.")
@@ -808,7 +822,7 @@ def parse_arguments(args):
         if not m:
             raise BrowseError("give `start_url`, or put an http(s) URL in the goal: "
                               "the agent needs a page to start on.")
-        start_url = m.group(0).rstrip(".,;:!?)]}")
+        start_url = _trim_url(m.group(0))
     if not re.match(r"https?://", start_url, re.IGNORECASE):
         raise BrowseError("`start_url` must be an http:// or https:// URL.")
     return {"goal": goal.strip(), "start_url": start_url,
@@ -1235,11 +1249,24 @@ class Server:
                 pass
 
 
-def main():
-    server = Server()
+def _make_stop():
+    """The SIGTERM/SIGHUP handler. Only the first signal interrupts: a second
+    one raised inside serve()'s finally and aborted shutdown half way, leaking
+    Chromium and its profile directory."""
+    fired = []
 
     def stop(_signum, _frame):
+        if fired:
+            return
+        fired.append(True)
         raise KeyboardInterrupt()
+
+    return stop
+
+
+def main():
+    server = Server()
+    stop = _make_stop()
 
     for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
         if sig is not None:
