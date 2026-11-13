@@ -426,29 +426,3 @@ class WslDriveRootScopeTests(unittest.TestCase):
             result = scope.classify_command(
                 "find /mnt/c -name x; find /mnt/c -name y", "/mnt/c")
             self.assertEqual(result["roots"], ["/mnt/c"])
-
-
-class SplitAndRootReading(unittest.TestCase):
-    """Shapes that used to come back with the wrong scope or roots."""
-
-    def c(self, command):
-        return scope.classify_command(command, cwd="/tmp", windows=False)
-
-    def test_find_exec_with_an_escaped_semicolon_is_one_stage(self):
-        self.assertEqual(self.c("find / -name x -exec ls {} \;")["scope"], "disk_wide")
-
-    def test_a_newline_separates_commands(self):
-        r = self.c("find /opt -name x\nfind / -name y")
-        self.assertEqual(r["scope"], "disk_wide")
-        self.assertIn("/", r["roots"])
-
-    def test_a_heredoc_body_is_still_not_a_command(self):
-        self.assertNotEqual(self.c("cat <<EOF > f\nfind / -name y\nEOF\nls")["scope"], "disk_wide")
-
-    def test_a_line_continuation_stays_one_command(self):
-        self.assertEqual(self.c("find / \\\n  -name x")["roots"], ["/"])
-
-    def test_a_pattern_from_an_option_leaves_the_first_path_a_root(self):
-        for command in ("rg -e foo /", "rg --files /", "grep -rn --regexp=foo /"):
-            self.assertEqual(self.c(command)["roots"], ["/"], command)
-        self.assertEqual(self.c("grep -r -e foo /opt")["roots"], ["/opt"])

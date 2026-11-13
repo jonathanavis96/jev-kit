@@ -24,7 +24,6 @@ Nothing here touches the filesystem, so it is safe to call on a Linux box
 about a Windows path that does not exist there, which is exactly what the
 Windows unit tests do.
 """
-import ntpath
 import os
 import re
 
@@ -95,12 +94,6 @@ def canonical(path):
     while "\\\\" in body:
         body = body.replace("\\\\", "\\")
     s = head + body
-
-    if any(part in (".", "..") for part in s.split("\\")):
-        # `C:\Users\me\..` is the profiles directory and `C:\Users\..` the
-        # drive root; left unresolved, neither compared equal to the root a
-        # search is measured against, so neither read as disk-wide.
-        s = ntpath.normpath(s)
 
     if _DRIVE_RE.match(s):
         s = s[0].upper() + s[1:]

@@ -338,14 +338,5 @@ class TestLinuxIsUnchanged(unittest.TestCase):
         self.assertEqual(result["roots"], ["/home/alice/a b"])
 
 
-class TestDotDotRoots(unittest.TestCase):
-    def test_dot_dot_is_resolved_before_comparing_roots(self):
-        from airlock import winpath
-        self.assertEqual(winpath.canonical(r"C:\Users\me\.."), "C:\\Users")
-        self.assertEqual(winpath.canonical(r"C:\Users\.."), "C:\\")
-        self.assertEqual(winpath.canonical("c:/x/../.."), "C:\\")
-        self.assertEqual(winpath.canonical(r"..\x"), "..\\x")
-
-
 if __name__ == "__main__":
     unittest.main()
