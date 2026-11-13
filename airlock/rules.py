@@ -541,6 +541,21 @@ def all_segments(command):
 _ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 
 
+def _after_assignment(toks, i):
+    """The index after the assignment at toks[i]. `words()` splits a quoted
+    value on its spaces, so `MSG="Remove sudo usage"` is three words there
+    and one to bash; read word by word, `sudo` looked like the program."""
+    value = toks[i].split("=", 1)[1] if "=" in toks[i] else ""
+    quote = value[:1]
+    j = i + 1
+    if quote in ("'", '"') and value.count(quote) % 2 == 1:
+        while j < len(toks):
+            j += 1
+            if toks[j - 1].endswith(quote):
+                break
+    return j
+
+
 def words(segment):
     """Whitespace tokens of a segment, quotes stripped off the ends. Never
     raises (unlike shlex.split on an unbalanced quote)."""
@@ -608,7 +623,7 @@ def _wrapped_command(toks, start=0):
             i += 2 if t in value_opts else 1
             continue
         if wrapper == "env" and _ASSIGN_RE.match(t):
-            i += 1
+            i = _after_assignment(toks, i)
             continue
         break
     if wrapper == "timeout":
@@ -710,7 +725,7 @@ def program_of(segment):
             at += 1
             continue
         if _ASSIGN_RE.match(head):
-            at += 1
+            at = _after_assignment(toks, at)
             continue
         if head.rsplit("/", 1)[-1] in _VALUE_WRAPPERS:
             # `env FOO=1 sudo ...`, `timeout 5 rm -rf /`: the wrapper runs the
@@ -1845,7 +1860,7 @@ def _sudo_rest(toks, idx):
                     break
             continue
         if _ASSIGN_RE.match(t):
-            i += 1
+            i = _after_assignment(toks, i)
             continue
         break
     return [t for t in toks[i:] if not t.startswith("-") or t in _PKG_SUBS]
@@ -2382,7 +2397,7 @@ def _rd_command(toks, depth=0):
             at += 1  # a case pattern: `x)`, `a|b)`
             continue
         if _ASSIGN_RE.match(t):
-            at += 1
+            at = _after_assignment(toks, at)
             continue
         base = t.rsplit("/", 1)[-1]
         if base in ("env", "timeout", "sudo") or base in _RD_PLAIN_WRAPPERS:
@@ -2411,7 +2426,7 @@ def _rd_command(toks, depth=0):
                 if at < n and toks[at] == "-":
                     at += 1
                 while at < n and _ASSIGN_RE.match(toks[at]):
-                    at += 1
+                    at = _after_assignment(toks, at)
             if base == "timeout" and at < n:
                 at += 1  # the duration
             if at >= n:
