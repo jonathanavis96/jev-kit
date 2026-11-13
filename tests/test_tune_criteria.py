@@ -172,5 +172,12 @@ class TestApplyCriteriaReplacement(unittest.TestCase):
         paired = tune.pair_verdicts([{"id": "a"}, {"id": "b"}], [{"x": 1}, {"x": 2}])
         self.assertEqual([v["x"] for _r, v in paired], [1, 2])
 
+    def test_the_criteria_prompt_carries_the_correct_label(self):
+        item = {"row": {"guard": "tool_choice_guard", "input_summary": {"command": "grep -rn x /"},
+                        "answers": {"search_intent": {"choice": "content_search"}}},
+                "verdict": {"correct_label": "filename_search", "reason": "looks for a file"}}
+        prompt = tune.build_criteria_prompt("", [tune.wrong_case_for_prompt(item)], "")
+        self.assertIn('"correct_label": "filename_search"', prompt)
+
 if __name__ == "__main__":
     unittest.main()

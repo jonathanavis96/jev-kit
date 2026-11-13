@@ -815,6 +815,18 @@ def allowed_criteria_options(source):
     return out
 
 
+def wrong_case_for_prompt(item):
+    """One wrong row for the criteria prompt, carrying the label the judge
+    says was correct. The prompt promises "the correct label" for each case;
+    the bare row holds only the wrong answer."""
+    case = dict(item["row"])
+    verdict = item.get("verdict") or {}
+    case["correct_label"] = verdict.get("correct_label")
+    if verdict.get("reason"):
+        case["judge_reason"] = verdict.get("reason")
+    return case
+
+
 def build_criteria_prompt(current_questions_source, wrong_cases, docs_summary):
     wrong_json = json.dumps(wrong_cases, indent=2, default=str)
     allowed = allowed_criteria_options(current_questions_source)
@@ -1388,7 +1400,8 @@ def main():
     questions_path = WORKTREE_DIR / "airlock" / "questions.py"
     try:
         current_source = questions_path.read_text()
-        criteria_prompt = build_criteria_prompt(current_source, [w["row"] for w in wrong], DOCS_GUIDANCE_SUMMARY)
+        criteria_prompt = build_criteria_prompt(
+            current_source, [wrong_case_for_prompt(w) for w in wrong], DOCS_GUIDANCE_SUMMARY)
         criteria_output = _run_claude(
             criteria_prompt, effort=judge_effort(), model=judge_model(), bin_path=judge_bin
         )
