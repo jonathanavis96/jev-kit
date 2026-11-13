@@ -40,6 +40,10 @@ if [ -z "${TYPESAFE_API_KEY:-}" ] && [ -r "$envfile" ]; then
 fi
 [ -n "${TYPESAFE_API_KEY:-}" ] || exit 0
 export TYPESAFE_API_KEY JEV_BELAY_LOG=1
-belay_home="${AIRLOCK_BELAY_DIR:-$HOME/.local/share/jev-belay}"
+# belay/install.sh rewrites the next line to the home it installed into, so a
+# --home (or an AIRLOCK_BELAY_DIR set only at install time) still resolves when
+# the hook runs without that variable.
+belay_default_home="$HOME/.local/share/jev-belay"
+belay_home="${AIRLOCK_BELAY_DIR:-$belay_default_home}"
 [ -e "$belay_home/current/belay.mjs" ] || belay_home="$here"
 exec node "$belay_home/current/belay.mjs"

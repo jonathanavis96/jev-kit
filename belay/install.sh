@@ -73,9 +73,16 @@ echo "belay: current -> $RELEASE_DIR"
 
 # --- the wrapper -------------------------------------------------------------
 mkdir -p "$BIN_DIR"
-install -m 755 "$SCRIPT_DIR/run.sh" "$WRAPPER"
 # run.sh reads $BELAY_HOME/current/belay.mjs directly, so nothing else lands
-# in $BIN_DIR.
+# in $BIN_DIR. The home is baked in: the hook runs without AIRLOCK_BELAY_DIR,
+# so a --home install otherwise fell back to the default and found nothing.
+BAKED_HOME="belay_default_home=$(printf '%q' "$BELAY_HOME")" \
+  awk '/^belay_default_home=/ { print ENVIRON["BAKED_HOME"]; next } { print }' \
+  "$SCRIPT_DIR/run.sh" > "$WRAPPER.tmp.$$"
+grep -q '^belay_default_home=' "$WRAPPER.tmp.$$" || {
+  rm -f "$WRAPPER.tmp.$$"; echo "belay: could not write the wrapper" >&2; exit 1; }
+chmod 755 "$WRAPPER.tmp.$$"
+mv -f "$WRAPPER.tmp.$$" "$WRAPPER"
 echo "belay: wrapper -> $WRAPPER (uses $BELAY_HOME/current)"
 
 # Key-file resolution: the ONE shell implementation, shared with every other
