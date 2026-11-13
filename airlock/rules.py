@@ -1370,8 +1370,9 @@ def _secret_in_shell(command, depth=0, cwd="", work=None):
         if prog in ("env", "set", "export", "declare") and not args:
             if prog == "env" and seg_idx < top_level and _names_only_pipe(pairs, seg_idx):
                 continue
-            if prog in ("env", "set"):
-                return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
+            # Bare `export` prints every exported variable with its value, as
+            # `export -p` does, and bare `declare` every variable.
+            return Match("bare `%s` dumps every variable, secrets included" % prog, R1_SUGGESTION)
         if prog == "export" and args == ["-p"]:
             return Match("`export -p` dumps every exported variable, secrets included", R1_SUGGESTION)
         if prog == "declare" and args and args[0] in ("-x", "-p"):

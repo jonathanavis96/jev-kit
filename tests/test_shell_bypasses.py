@@ -593,6 +593,16 @@ class QuotedPathWithASpace(unittest.TestCase):
         self.assertFalse(r1('cat "/home/u/My Project/notes.txt"'))
 
 
+class BareExportAndDeclare(unittest.TestCase):
+    def test_bare_export_and_declare_dump_the_environment(self):
+        for c in ("export", "declare", "export | grep KEY"):
+            self.assertTrue(r1(c), c)
+
+    def test_setting_a_variable_is_not_a_dump(self):
+        self.assertFalse(r1("export FOO=1"))
+        self.assertFalse(r1("declare -f myfn"))
+
+
 class HealthSummaryTimestamps(unittest.TestCase):
     def test_a_naive_timestamp_does_not_break_the_summary(self):
         now = datetime.datetime.now(datetime.timezone.utc)
