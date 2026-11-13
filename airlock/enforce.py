@@ -521,12 +521,9 @@ def _run_rule(ctx, rule, match, eff, base, override_reason, b_ms, session_id, mo
         conf, margin = _confidence_and_margin(answers)
         entry["confidence"] = conf
         entry["margin"] = margin
-        if eff in ("deny", "ask") and conf is not None:
+        if eff == "deny" and conf is not None:
             # A Choice-backed deny must clear the shared bar; a Noul answer
-            # carries no margin and is never used for a deny action. `ask`
-            # clears the same bar: in an unattended session it IS a deny
-            # (effective_block_action), and below the bar it blocked calls
-            # that `deny` itself would have let through.
+            # carries no margin and is never used for a deny action.
             if not policy.meets_deny_bar(conf, margin):
                 fires = False
                 entry.setdefault("gated", "below_deny_bar")

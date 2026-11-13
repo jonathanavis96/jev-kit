@@ -558,20 +558,6 @@ class TestEnforcePath(unittest.TestCase):
         emit.assert_not_called()
         self.assertIn("error", self.logged[-1])
 
-    def test_an_ask_rule_below_the_deny_bar_does_not_fire(self):
-        answers = {"prints_a_secret": {"choice": "yes", "confidence": 0.55,
-                                       "probabilities": {"yes": 0.55, "no": 0.45}}}
-        with mock.patch("airlock.rules.load_action_overrides",
-                        return_value={"R1-secret-exposure": "ask"}), \
-             mock.patch("airlock.client.ask", return_value=({"answers": answers}, 5)), \
-             mock.patch.object(enforce, "emit_deny") as deny, \
-             mock.patch.object(enforce, "emit_ask") as ask:
-            denied = enforce.handle(self._payload("cat ~/notes/secrets.txt"), "Bash")
-        self.assertFalse(denied)
-        deny.assert_not_called()
-        ask.assert_not_called()
-        self.assertEqual(self.logged[-1].get("gated"), "below_deny_bar")
-
     def test_budget_exceeded_never_denies(self):
         answers = {"prints_a_secret": {"choice": "yes", "confidence": 0.99,
                                        "probabilities": {"yes": 0.99, "no": 0.01}}}
