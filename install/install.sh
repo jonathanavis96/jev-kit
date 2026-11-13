@@ -651,7 +651,7 @@ if [ "$WANT_TUNING" = "1" ]; then
       printf '# Sourced by tuning/tune.sh. Paths and names only -- never a key.
 '
       if [ -n "$TUNE_JUDGE_BIN" ]; then
-        printf 'AIRLOCK_TUNE_CLAUDE_BIN=%s
+        printf 'AIRLOCK_TUNE_CLAUDE_BIN=%q
 ' "$TUNE_JUDGE_BIN"
       else
         printf '# No `claude` binary found at install time. Set one here:
@@ -662,10 +662,10 @@ if [ "$WANT_TUNING" = "1" ]; then
       printf '# Which Claude account tree the judge bills. Unset = ~/.claude.
 '
       if [ -n "${AIRLOCK_TUNE_CLAUDE_CONFIG_DIR:-}" ]; then
-        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%s
+        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%q
 ' "$AIRLOCK_TUNE_CLAUDE_CONFIG_DIR"
       elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%s
+        printf 'AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=%q
 ' "$CLAUDE_CONFIG_DIR"
       else
         printf '#AIRLOCK_TUNE_CLAUDE_CONFIG_DIR=$HOME/.claude
@@ -674,14 +674,14 @@ if [ "$WANT_TUNING" = "1" ]; then
       printf '# Judge model and effort. Unset = opus / high.
 '
       if [ -n "${AIRLOCK_TUNE_JUDGE_MODEL:-}" ]; then
-        printf 'AIRLOCK_TUNE_JUDGE_MODEL=%s
+        printf 'AIRLOCK_TUNE_JUDGE_MODEL=%q
 ' "$AIRLOCK_TUNE_JUDGE_MODEL"
       else
         printf '#AIRLOCK_TUNE_JUDGE_MODEL=opus
 '
       fi
       if [ -n "${AIRLOCK_TUNE_JUDGE_EFFORT:-}" ]; then
-        printf 'AIRLOCK_TUNE_JUDGE_EFFORT=%s
+        printf 'AIRLOCK_TUNE_JUDGE_EFFORT=%q
 ' "$AIRLOCK_TUNE_JUDGE_EFFORT"
       else
         printf '#AIRLOCK_TUNE_JUDGE_EFFORT=high

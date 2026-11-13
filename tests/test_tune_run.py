@@ -495,6 +495,18 @@ class TestShellWiring(unittest.TestCase):
         self.assertIn('chmod 600 "$TUNE_ENV"', text)
         self.assertIn("AIRLOCK_TUNE_CLAUDE_BIN=", text)
 
+    def test_tune_env_values_are_quoted_for_sourcing(self):
+        # A path with a space was written bare, and tune.sh (set -e) then
+        # ran the second word as a command when it sourced the file.
+        text = Path("install/install.sh").read_text()
+        self.assertNotRegex(text, r"printf 'AIRLOCK_TUNE_[A-Z_]+=%s")
+        value = "/mnt/c/Program Files/claude $HOME"
+        out = subprocess.run(
+            ["bash", "-c", 'set -e; f=$(mktemp); printf "V=%q\\n" "$1" > "$f"; '
+             '. "$f"; rm -f "$f"; printf %s "$V"', "_", value],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual((out.returncode, out.stdout), (0, value))
+
     def test_doctor_fails_when_no_judge_binary_resolves(self):
         text = Path("install/doctor.sh").read_text()
         self.assertIn("--print-judge-bin", text)
