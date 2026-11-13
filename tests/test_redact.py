@@ -145,6 +145,11 @@ class TestRedact(unittest.TestCase):
         path = "/home/someone/code/project/src/components/Button"
         self.assertEqual(redact.redact("cat %s" % path), "cat %s" % path)
 
+    def test_a_long_letters_only_secret_with_a_slash_is_still_redacted(self):
+        for secret in ("abcdefghijklmnopqrstuvwxyzABCDEFGH/ijklmnop",
+                       "abcdefghijklmnop/qrstuvwxyzABCDEFGHIJ"):
+            self.assertNotIn(secret, redact.redact("x %s y" % secret), secret)
+
     def test_short_strings_untouched(self):
         text = "run the tests and check status"
         self.assertEqual(redact.redact(text), text)
