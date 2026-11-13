@@ -641,6 +641,39 @@ class QuotedAssignmentValues(unittest.TestCase):
         self.assertTrue(fires('env X="a b" sudo reboot', R5))
 
 
+class CommitMessageWords(unittest.TestCase):
+    def test_a_message_naming_a_secret_file_stages_nothing(self):
+        for c in ('git commit -m "ignore .env files"', "git commit -am 'drop .env'",
+                  'git commit --message="no .env here"'):
+            self.assertFalse(fires(c, R9), c)
+
+    def test_a_pathspec_or_a_token_still_counts(self):
+        token = "sk-" + "abcdefghijklmnopqrstuvwx1234"
+        for c in ('git commit -m "x" .env', "git add .env",
+                  'git commit -m "key %s"' % token):
+            self.assertTrue(fires(c, R9), c)
+
+
+class SudoThroughAShell(unittest.TestCase):
+    def test_sudo_handed_to_a_shell_is_still_sudo(self):
+        for c in ("bash -c 'sudo rm -rf /etc/x'", "eval sudo reboot",
+                  "sh -c \"bash -c 'sudo reboot'\"", 'bash <<< "sudo reboot"'):
+            self.assertTrue(fires(c, R5), c)
+
+    def test_a_named_install_through_a_shell_is_still_allowed(self):
+        self.assertFalse(fires("bash -c 'sudo apt-get install -y jq'", R5))
+
+
+class QuotedTilde(unittest.TestCase):
+    def test_a_quoted_tilde_is_a_file_named_tilde(self):
+        for c in ('rm -rf "~"', "rm -rf '~'", 'rm -rf "~/"'):
+            self.assertFalse(fires(c, R7_ROOT), c)
+
+    def test_the_home_directory_is_still_denied(self):
+        for c in ("rm -rf ~", 'rm -rf "$HOME"', 'rm -rf "/"', "rm '-rf' /"):
+            self.assertTrue(fires(c, R7_ROOT), c)
+
+
 class HealthSummaryTimestamps(unittest.TestCase):
     def test_a_naive_timestamp_does_not_break_the_summary(self):
         now = datetime.datetime.now(datetime.timezone.utc)
